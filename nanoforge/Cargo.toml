@@ -1,0 +1,10 @@
+[package]
+name = "nanoforge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+dynasm = "1.2"
+dynasmrt = "1.2"
+crossbeam = "0.8"
