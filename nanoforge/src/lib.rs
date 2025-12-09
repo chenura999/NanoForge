@@ -1,4 +1,5 @@
 pub mod assembler;
+pub mod benchmarker;
 pub mod hot_function;
 pub mod jit_memory;
 pub mod optimizer;

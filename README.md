@@ -9,6 +9,32 @@ NanoForge is a high-performance, self-optimizing JIT (Just-In-Time) engine writt
 *   **Privilege Separation**: Uses a dedicated **Daemon** process for performance monitoring (`perf_event_open`), allowing the main application to run with lower privileges.
 *   **Runtime Assembler**: Generates x86-64 machine code on the fly using `dynasm`.
 
+## 🧠 How It Works
+
+1.  **Privilege Separation**:
+    *   **Daemon**: Runs with `CAP_PERFMON` to access hardware counters (`perf_event_open`).
+    *   **Client**: Runs as a normal user process. Connects to Daemon via Unix Socket.
+
+2.  **JIT Compilation**:
+    *   Uses `dynasm` to generate x86-64 machine code at runtime.
+    *   Allocates memory using `memfd_create` with **Dual Mapping**:
+        *   **RW View**: For writing code (non-executable).
+        *   **RX View**: For executing code (non-writable).
+        *   *Result*: W^X security compliance.
+
+3.  **The Benchmark Sandbox (New!)**:
+    *   Instead of blindly guessing that "AVX2 is faster," NanoForge **proves it**.
+    *   When a function becomes "hot" (high instruction count):
+        1.  **Generate**: The engine generates multiple candidates (e.g., `Unrolled Loop`, `AVX2 SIMD`).
+        2.  **Race**: It runs each candidate in a "Sandbox" for 1000 iterations.
+        3.  **Measure**: It uses CPU Time Stamp Counter (`rdtsc`) to measure exact cycles.
+        4.  **Select**: The winner is hot-swapped into the running application.
+
+4.  **Hot Patching**:
+    *   The main loop calls a function pointer wrapped in an `AtomicPtr`.
+    *   The Optimizer swaps this pointer to the new, optimized code block.
+    *   Zero downtime.
+
 ## architecture
 
 ```mermaid
