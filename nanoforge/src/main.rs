@@ -30,6 +30,9 @@ fn main() {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
+    // Register Crash Handler (P0 Safety)
+    nanoforge::safety::register_crash_handler();
+
     let args = Args::parse();
 
     info!("NanoForge: Phase 8 - Heuristic Engine");
@@ -37,8 +40,6 @@ fn main() {
         "Configuration: Socket={}, Unrolled={}, AVX2={}",
         args.socket_path, args.threshold_unrolled, args.threshold_avx2
     );
-
-    safety::install_signal_handler();
 
     let page_size = 4096;
 

@@ -82,6 +82,19 @@ fn handle_client(mut stream: UnixStream) {
                             continue;
                         }
                         if let Ok(pid) = parts[1].parse::<i32>() {
+                            // SECURITY CHECK: Verify Client UID == Target PID Owner
+                            match check_permissions(&stream, pid) {
+                                Ok(_) => {
+                                    info!("Security Check Passed for PID: {}", pid);
+                                }
+                                Err(e) => {
+                                    warn!("Security Check Failed: {}", e);
+                                    let msg = format!("ERROR Security: {}\n", e);
+                                    let _ = stream.write_all(msg.as_bytes());
+                                    continue;
+                                }
+                            }
+
                             info!("Registering PID: {}", pid);
                             match Profiler::new_instruction_counter(pid) {
                                 Ok(p) => {
@@ -120,4 +133,48 @@ fn handle_client(mut stream: UnixStream) {
             }
         }
     }
+}
+
+fn check_permissions(stream: &UnixStream, target_pid: i32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::AsRawFd;
+
+    // 1. Get Client UID via libc::getsockopt
+    let fd = stream.as_raw_fd();
+    let client_uid = unsafe {
+        let mut ucred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        if libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut _ as *mut libc::c_void,
+            &mut len,
+        ) == 0
+        {
+            ucred.uid
+        } else {
+            return Err("Failed to get peer credentials".to_string());
+        }
+    };
+
+    // 2. Get Target PID Owner
+    let proc_path = format!("/proc/{}", target_pid);
+    let metadata =
+        fs::metadata(&proc_path).map_err(|e| format!("Failed to stat {}: {}", proc_path, e))?;
+    let target_uid = metadata.uid();
+
+    // 3. Compare
+    if client_uid != target_uid {
+        return Err(format!(
+            "Permission Denied: Client UID {} cannot profile Target UID {}",
+            client_uid, target_uid
+        ));
+    }
+
+    Ok(())
 }
