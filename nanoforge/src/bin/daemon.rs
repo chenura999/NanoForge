@@ -69,50 +69,38 @@ fn handle_client(mut stream: UnixStream) {
             Ok(0) => break, // EOF
             Ok(_) => {
                 let line = line.trim();
-                let parts: Vec<&str> = line.split_whitespace().collect();
+                use nanoforge::protocol::{parse_command, Command};
 
-                if parts.is_empty() {
-                    continue;
-                }
-
-                match parts[0] {
-                    "REGISTER" => {
-                        if parts.len() < 2 {
-                            let _ = stream.write_all(b"ERROR Missing PID\n");
-                            continue;
+                match parse_command(line) {
+                    Command::Register(pid) => {
+                        // SECURITY CHECK: Verify Client UID == Target PID Owner
+                        match check_permissions(&stream, pid) {
+                            Ok(_) => {
+                                info!("Security Check Passed for PID: {}", pid);
+                            }
+                            Err(e) => {
+                                warn!("Security Check Failed: {}", e);
+                                let msg = format!("ERROR Security: {}\n", e);
+                                let _ = stream.write_all(msg.as_bytes());
+                                continue;
+                            }
                         }
-                        if let Ok(pid) = parts[1].parse::<i32>() {
-                            // SECURITY CHECK: Verify Client UID == Target PID Owner
-                            match check_permissions(&stream, pid) {
-                                Ok(_) => {
-                                    info!("Security Check Passed for PID: {}", pid);
-                                }
-                                Err(e) => {
-                                    warn!("Security Check Failed: {}", e);
-                                    let msg = format!("ERROR Security: {}\n", e);
-                                    let _ = stream.write_all(msg.as_bytes());
-                                    continue;
-                                }
-                            }
 
-                            info!("Registering PID: {}", pid);
-                            match Profiler::new_instruction_counter(pid) {
-                                Ok(p) => {
-                                    p.enable(); // Start profiling immediately
-                                    profiler = Some(p);
-                                    let _ = stream.write_all(b"OK\n");
-                                }
-                                Err(e) => {
-                                    error!("Failed to create profiler for PID {}: {}", pid, e);
-                                    let msg = format!("ERROR {}\n", e);
-                                    let _ = stream.write_all(msg.as_bytes());
-                                }
+                        info!("Registering PID: {}", pid);
+                        match Profiler::new_instruction_counter(pid) {
+                            Ok(p) => {
+                                p.enable(); // Start profiling immediately
+                                profiler = Some(p);
+                                let _ = stream.write_all(b"OK\n");
                             }
-                        } else {
-                            let _ = stream.write_all(b"ERROR Invalid PID\n");
+                            Err(e) => {
+                                error!("Failed to create profiler for PID {}: {}", pid, e);
+                                let msg = format!("ERROR {}\n", e);
+                                let _ = stream.write_all(msg.as_bytes());
+                            }
                         }
                     }
-                    "READ" => {
+                    Command::Read => {
                         if let Some(ref p) = profiler {
                             let count = p.read();
                             let response = format!("{}\n", count);
@@ -121,9 +109,10 @@ fn handle_client(mut stream: UnixStream) {
                             let _ = stream.write_all(b"ERROR Not Registered\n");
                         }
                     }
-                    _ => {
-                        warn!("Unknown command received: {}", parts[0]);
-                        let _ = stream.write_all(b"ERROR Unknown Command\n");
+                    Command::Error(msg) => {
+                        warn!("Command Error: {}", msg);
+                        let response = format!("ERROR {}\n", msg);
+                        let _ = stream.write_all(response.as_bytes());
                     }
                 }
             }
