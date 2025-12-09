@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::jit_memory::DualMappedMemory;
 use crossbeam::epoch::{self, Atomic, Owned};
 use std::sync::atomic::Ordering;

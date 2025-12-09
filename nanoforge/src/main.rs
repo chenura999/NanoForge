@@ -1,44 +1,68 @@
+mod assembler;
 mod hot_function;
 mod jit_memory;
+mod profiler;
 mod safety;
 mod sandbox;
 
+use assembler::CodeGenerator;
+use hot_function::HotFunction;
 use jit_memory::DualMappedMemory;
-use std::ptr;
+use profiler::Profiler;
+use std::sync::Arc;
 
 fn main() {
-    println!("NanoForge: Phase 4 - Stability & Safety Rails");
+    println!("NanoForge: Phase 6 - The Profiler");
 
-    // 1. Install Signal Handler
     safety::install_signal_handler();
-    println!("Signal handler installed.");
 
     let page_size = 4096;
-    let mem = DualMappedMemory::new(page_size).unwrap();
 
-    // 2. Generate "Bad" Code (SIGILL)
-    // 0F 0B is UD2 (Undefined Instruction) on x86
-    let bad_code: [u8; 2] = [0x0f, 0x0b];
+    // --- Step 1: Generate Code ---
+    // We'll generate a loop to make it "hot" enough to measure
+    // fn(iterations: i64) -> i64
+    // loop: dec rdi; jnz loop; ret
+    // This is hard to generate with just add_n.
+    // Let's stick to add_n but call it many times.
 
-    unsafe {
-        ptr::copy_nonoverlapping(bad_code.as_ptr(), mem.rw_ptr, bad_code.len());
+    println!("Generating 'Add 1' variant...");
+    let code_a_bytes = CodeGenerator::generate_add_n(1).unwrap();
+    let mem_a = DualMappedMemory::new(page_size).unwrap();
+    CodeGenerator::emit_to_memory(&mem_a, &code_a_bytes, 0);
+    let hot_func = Arc::new(HotFunction::new(mem_a, 0));
+
+    // --- Step 2: Profile It ---
+    // Note: perf_event_open usually requires CAP_PERFMON or root, or paranoid level <= 1.
+    // If this fails, we'll print a warning.
+
+    let profiler = match Profiler::new_instruction_counter() {
+        Ok(p) => {
+            println!("Profiler initialized (Instructions).");
+            Some(p)
+        }
+        Err(e) => {
+            println!("WARNING: Profiler init failed (are you root?): {}", e);
+            None
+        }
+    };
+
+    if let Some(p) = &profiler {
+        p.enable();
     }
-    mem.flush_icache();
-    println!("Wrote 'Bad' Code (UD2 instruction).");
 
-    // 3. Execute Safely
-    let func: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(mem.rx_ptr) };
-
-    println!("Attempting to execute bad code inside sandbox...");
-    let result = safety::run_safely(|| {
-        println!("  -> Inside sandbox, calling function...");
-        func(0)
-    });
-
-    match result {
-        Ok(val) => println!("Success: {}", val),
-        Err(e) => println!("SUCCESSFULLY CAUGHT CRASH: {}", e),
+    let mut total_result = 0;
+    for _ in 0..1_000_000 {
+        total_result += hot_func.call(1);
     }
 
-    println!("Main thread continues... System survived.");
+    if let Some(p) = &profiler {
+        p.disable();
+        let count = p.read();
+        println!("Profiled 1,000,000 calls.");
+        println!("Total Instructions Executed: {}", count);
+        // 1M calls * (mov + add + ret + overhead) ~= 3-5M instructions?
+    }
+
+    println!("Result: {}", total_result);
+    println!("Phase 6 Complete.");
 }
