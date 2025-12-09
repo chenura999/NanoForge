@@ -44,11 +44,11 @@ pub struct Profiler {
 }
 
 impl Profiler {
-    pub fn new_instruction_counter() -> Result<Self, String> {
-        Self::new(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)
+    pub fn new_instruction_counter(pid: i32) -> Result<Self, String> {
+        Self::new(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, pid)
     }
 
-    fn new(type_: u32, config: u64) -> Result<Self, String> {
+    fn new(type_: u32, config: u64, pid: i32) -> Result<Self, String> {
         let mut attr: PerfEventAttr = unsafe { mem::zeroed() };
         attr.type_ = type_;
         attr.size = mem::size_of::<PerfEventAttr>() as u32;
@@ -71,7 +71,7 @@ impl Profiler {
             syscall(
                 SYS_PERF_EVENT_OPEN,
                 &attr as *const PerfEventAttr,
-                0,
+                pid,
                 -1,
                 -1,
                 0,
@@ -118,5 +118,82 @@ impl Profiler {
 impl Drop for Profiler {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
+    }
+}
+
+pub trait ProfileSource: Send + Sync {
+    fn read(&self) -> u64;
+    fn enable(&self);
+    fn disable(&self);
+}
+
+impl ProfileSource for Profiler {
+    fn read(&self) -> u64 {
+        self.read()
+    }
+    fn enable(&self) {
+        self.enable()
+    }
+    fn disable(&self) {
+        self.disable()
+    }
+}
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+
+pub struct RemoteProfiler {
+    stream: Mutex<UnixStream>,
+}
+
+impl RemoteProfiler {
+    pub fn new(pid: i32) -> Result<Self, String> {
+        let socket_path = "/tmp/nanoforge.sock";
+        let mut stream = UnixStream::connect(socket_path).map_err(|e| e.to_string())?;
+
+        // Register
+        let cmd = format!("REGISTER {}\n", pid);
+        stream
+            .write_all(cmd.as_bytes())
+            .map_err(|e| e.to_string())?;
+
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut response = String::new();
+        reader.read_line(&mut response).map_err(|e| e.to_string())?;
+
+        if response.trim() != "OK" {
+            return Err(format!("Daemon registration failed: {}", response.trim()));
+        }
+
+        Ok(RemoteProfiler {
+            stream: Mutex::new(stream),
+        })
+    }
+}
+
+use std::sync::Mutex;
+
+impl ProfileSource for RemoteProfiler {
+    fn read(&self) -> u64 {
+        let mut stream = self.stream.lock().unwrap();
+        if stream.write_all(b"READ\n").is_err() {
+            return 0;
+        }
+
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut response = String::new();
+        if reader.read_line(&mut response).is_err() {
+            return 0;
+        }
+
+        response.trim().parse().unwrap_or(0)
+    }
+
+    fn enable(&self) {
+        // Daemon enables automatically on register
+    }
+
+    fn disable(&self) {
+        // Daemon cleans up on connection close
     }
 }
