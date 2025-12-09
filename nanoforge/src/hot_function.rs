@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 pub struct JittedCode {
     // We keep memory here to ensure it stays alive as long as the code is used
     pub _memory: DualMappedMemory,
-    pub func_ptr: extern "C" fn(i64) -> i64,
+    pub func_ptr: extern "C" fn(u64) -> u64,
 }
 
 // SAFETY: JittedCode is immutable once created.
@@ -22,7 +22,7 @@ pub struct HotFunction {
 
 impl HotFunction {
     pub fn new(initial_code: DualMappedMemory, offset: usize) -> Self {
-        let func_ptr: extern "C" fn(i64) -> i64 =
+        let func_ptr: extern "C" fn(u64) -> u64 =
             unsafe { std::mem::transmute(initial_code.rx_ptr.add(offset)) };
 
         let code = JittedCode {
@@ -35,7 +35,7 @@ impl HotFunction {
         }
     }
 
-    pub fn call(&self, arg: i64) -> i64 {
+    pub fn call(&self, arg: u64) -> u64 {
         // 1. Enter critical section (pin the epoch)
         let guard = epoch::pin();
 
@@ -50,7 +50,7 @@ impl HotFunction {
     }
 
     pub fn update(&self, new_memory: DualMappedMemory, offset: usize) {
-        let func_ptr: extern "C" fn(i64) -> i64 =
+        let func_ptr: extern "C" fn(u64) -> u64 =
             unsafe { std::mem::transmute(new_memory.rx_ptr.add(offset)) };
 
         let new_code = JittedCode {
