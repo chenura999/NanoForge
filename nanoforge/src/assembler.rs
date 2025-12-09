@@ -17,7 +17,7 @@ impl CodeGenerator {
         dynasm!(ops
             ; .arch x64
             ; mov rax, rdi
-            ; add rax, n as i32
+            ; add rax, n
             ; ret
         );
 

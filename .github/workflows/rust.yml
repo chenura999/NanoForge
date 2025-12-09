@@ -1,0 +1,45 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          nanoforge/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check Formatting
+      run: cd nanoforge && cargo fmt -- --check
+
+    - name: Lint with Clippy
+      run: cd nanoforge && cargo clippy -- -D warnings
+
+    - name: Build
+      run: cd nanoforge && cargo build --verbose
+
+    - name: Run Tests
+      # Note: We skip tests that require sudo/capabilities in CI environment if they exist
+      # But our current tests (AVX2 sum) are pure userspace, so they should pass.
+      run: cd nanoforge && cargo test --verbose

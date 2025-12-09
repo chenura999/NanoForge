@@ -1,3 +1,4 @@
+use clap::Parser;
 use nanoforge::assembler::CodeGenerator;
 use nanoforge::hot_function::HotFunction;
 use nanoforge::jit_memory::DualMappedMemory;
@@ -7,19 +8,46 @@ use nanoforge::safety;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tracing::{error, info, warn};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the Unix Domain Socket
+    #[arg(short, long, default_value = "/tmp/nanoforge.sock")]
+    socket_path: String,
+
+    /// Threshold for Unrolled Loop optimization
+    #[arg(long, default_value_t = 10_000_000)]
+    threshold_unrolled: u64,
+
+    /// Threshold for AVX2 optimization
+    #[arg(long, default_value_t = 50_000_000)]
+    threshold_avx2: u64,
+}
 
 fn main() {
-    println!("NanoForge: Phase 8 - Heuristic Engine");
+    // Initialize logging
+    tracing_subscriber::fmt::init();
+
+    let args = Args::parse();
+
+    info!("NanoForge: Phase 8 - Heuristic Engine");
+    info!(
+        "Configuration: Socket={}, Unrolled={}, AVX2={}",
+        args.socket_path, args.threshold_unrolled, args.threshold_avx2
+    );
 
     safety::install_signal_handler();
 
     let page_size = 4096;
 
     // --- Step 1: Initial State (Simple Loop) ---
-    println!("Initializing with 'Simple Loop' variant...");
+    info!("Initializing with 'Simple Loop' variant...");
     // We calculate sum(0..1000)
-    let code_a_bytes = CodeGenerator::generate_sum_loop().unwrap();
-    let mem_a = DualMappedMemory::new(page_size).unwrap();
+    // We calculate sum(0..1000)
+    let code_a_bytes = CodeGenerator::generate_sum_loop().expect("Failed to generate initial code");
+    let mem_a = DualMappedMemory::new(page_size).expect("Failed to allocate JIT memory");
     CodeGenerator::emit_to_memory(&mem_a, &code_a_bytes, 0);
     let hot_func = Arc::new(HotFunction::new(mem_a, 0));
 
@@ -29,22 +57,22 @@ fn main() {
     let profiler: Arc<dyn nanoforge::profiler::ProfileSource> =
         match nanoforge::profiler::RemoteProfiler::new(pid) {
             Ok(p) => {
-                println!("Connected to NanoForge Daemon.");
+                info!("Connected to NanoForge Daemon.");
                 Arc::new(p)
             }
             Err(e) => {
-                println!(
+                warn!(
                     "Daemon connection failed ({}), falling back to local profiler.",
                     e
                 );
                 match Profiler::new_instruction_counter(0) {
                     Ok(p) => {
-                        println!("Local Profiler initialized.");
+                        info!("Local Profiler initialized.");
                         p.enable();
                         Arc::new(p)
                     }
                     Err(e) => {
-                        println!("WARNING: Profiler init failed: {}", e);
+                        error!("Profiler init failed: {}", e);
                         return;
                     }
                 }
@@ -53,18 +81,19 @@ fn main() {
 
     // --- Step 3: Start Optimizer ---
     // Trigger optimization based on internal heuristics
-    let optimizer = Optimizer::new(hot_func.clone(), profiler.clone());
+    let optimizer = Optimizer::new(
+        hot_func.clone(),
+        profiler.clone(),
+        args.threshold_unrolled,
+        args.threshold_avx2,
+    );
     optimizer.start_background_thread();
 
     // --- Step 4: Workload ---
-    println!("Starting workload (Summing 0..1000 repeatedly)...");
+    info!("Starting workload (Summing 0..1000 repeatedly)...");
     let mut total_result = 0;
 
     // Run enough to hit > 50M instructions
-    // Each call is ~1000 instructions (roughly).
-    // We need > 50,000 calls * 1000 = 50M.
-    // Let's do 100 steps of 10,000 calls = 1M per step.
-    // Total = 100M instructions.
     for i in 0..100 {
         let mut batch_sum = 0;
         // 10,000 calls * 1000 iterations
@@ -75,7 +104,7 @@ fn main() {
         total_result += batch_sum;
 
         let current_count = profiler.read();
-        println!(
+        info!(
             "Step {}: Instructions = {}, Last Batch Sum = {}",
             i, current_count, batch_sum
         );
@@ -84,6 +113,6 @@ fn main() {
     }
 
     profiler.disable();
-    println!("Final Result: {}", total_result);
-    println!("Phase 10 Complete.");
+    info!("Final Result: {}", total_result);
+    info!("Phase 10 Complete.");
 }

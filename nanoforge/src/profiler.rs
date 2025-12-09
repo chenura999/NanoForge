@@ -180,7 +180,11 @@ impl ProfileSource for RemoteProfiler {
             return 0;
         }
 
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let stream_clone = match stream.try_clone() {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let mut reader = BufReader::new(stream_clone);
         let mut response = String::new();
         if reader.read_line(&mut response).is_err() {
             return 0;

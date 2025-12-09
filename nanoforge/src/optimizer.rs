@@ -16,15 +16,24 @@ enum OptimizationLevel {
 pub struct Optimizer {
     hot_function: Arc<HotFunction>,
     profiler: Arc<dyn ProfileSource>, // Changed type
-                                      // We'll use hardcoded thresholds for this demo, or we could pass them in.
-                                      // threshold: u64, // Removed single threshold
+    // We'll use hardcoded thresholds for this demo, or we could pass them in.
+    // threshold: u64, // Removed single threshold
+    threshold_unrolled: u64,
+    threshold_avx2: u64,
 }
 
 impl Optimizer {
-    pub fn new(hot_function: Arc<HotFunction>, profiler: Arc<dyn ProfileSource>) -> Self {
+    pub fn new(
+        hot_function: Arc<HotFunction>,
+        profiler: Arc<dyn ProfileSource>,
+        threshold_unrolled: u64,
+        threshold_avx2: u64,
+    ) -> Self {
         Optimizer {
             hot_function,
             profiler,
+            threshold_unrolled,
+            threshold_avx2,
         }
     }
 
@@ -33,10 +42,6 @@ impl Optimizer {
             println!("Optimizer: Background thread started.");
             let mut current_level = OptimizationLevel::Baseline;
 
-            // Thresholds
-            const THRESHOLD_UNROLLED: u64 = 10_000_000;
-            const THRESHOLD_AVX2: u64 = 50_000_000;
-
             loop {
                 thread::sleep(Duration::from_millis(100));
 
@@ -44,10 +49,10 @@ impl Optimizer {
 
                 match current_level {
                     OptimizationLevel::Baseline => {
-                        if count > THRESHOLD_UNROLLED {
+                        if count > self.threshold_unrolled {
                             println!(
                                 "Optimizer: Threshold 1 reached ({} > {}). Upgrading to Unrolled Loop...",
-                                count, THRESHOLD_UNROLLED
+                                count, self.threshold_unrolled
                             );
                             match CodeGenerator::generate_sum_loop_unrolled() {
                                 Ok(code) => self.apply_optimization(
@@ -60,10 +65,10 @@ impl Optimizer {
                         }
                     }
                     OptimizationLevel::Unrolled => {
-                        if count > THRESHOLD_AVX2 {
+                        if count > self.threshold_avx2 {
                             println!(
                                 "Optimizer: Threshold 2 reached ({} > {}). Upgrading to AVX2...",
-                                count, THRESHOLD_AVX2
+                                count, self.threshold_avx2
                             );
 
                             if is_x86_feature_detected!("avx2") {

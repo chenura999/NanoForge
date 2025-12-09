@@ -1,41 +1,44 @@
+use clap::Parser;
 use nanoforge::profiler::Profiler;
-use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::thread;
+use tracing::{error, info, warn};
 
-// We need to import Profiler from the library.
-// Since `nanoforge` is a binary crate, we might need to move `profiler.rs` to a lib.rs
-// or just copy the module declaration if we can't easily refactor to a workspace.
-// For now, let's assume we can declare the module here or we need to refactor `main.rs` to `lib.rs`.
-// Actually, `src/bin/daemon.rs` is a separate binary in the same crate.
-// It can't easily access modules defined in `src/main.rs`.
-// We should move the modules to `src/lib.rs` to share them.
-
-// TEMPORARY: We will duplicate the Profiler struct here for the daemon
-// OR we will refactor the project structure.
-// Refactoring is better.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the Unix Domain Socket
+    #[arg(short, long, default_value = "/tmp/nanoforge.sock")]
+    socket_path: String,
+}
 
 fn main() {
-    println!("NanoForge Daemon starting...");
+    // Initialize logging
+    tracing_subscriber::fmt::init();
 
-    let socket_path = "/tmp/nanoforge.sock";
-    if Path::new(socket_path).exists() {
-        fs::remove_file(socket_path).unwrap();
+    let args = Args::parse();
+
+    info!("NanoForge Daemon starting...");
+
+    if Path::new(&args.socket_path).exists() {
+        if let Err(e) = fs::remove_file(&args.socket_path) {
+            error!("Failed to remove existing socket: {}", e);
+            return;
+        }
     }
 
-    let listener = UnixListener::bind(socket_path).unwrap();
-    println!("Listening on {}", socket_path);
+    let listener = match UnixListener::bind(&args.socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind to socket {}: {}", args.socket_path, e);
+            return;
+        }
+    };
 
-    // Map PID -> Profiler
-    // We use a Mutex to share state across threads (if we were multi-threaded per connection)
-    // For simplicity, we can handle connections sequentially or spawn a thread per connection.
-    // Since a profiler instance is tied to a connection session usually (or we can keep a global map).
-    // Let's keep it simple: One connection = One session.
-    // The client registers a PID, and we keep the profiler for that connection.
+    info!("Listening on {}", args.socket_path);
 
     for stream in listener.incoming() {
         match stream {
@@ -43,14 +46,21 @@ fn main() {
                 thread::spawn(|| handle_client(stream));
             }
             Err(err) => {
-                println!("Error accepting connection: {}", err);
+                error!("Error accepting connection: {}", err);
             }
         }
     }
 }
 
 fn handle_client(mut stream: UnixStream) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let stream_clone = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to clone stream: {}", e);
+            return;
+        }
+    };
+    let mut reader = BufReader::new(stream_clone);
     let mut profiler: Option<Profiler> = None;
 
     loop {
@@ -72,7 +82,7 @@ fn handle_client(mut stream: UnixStream) {
                             continue;
                         }
                         if let Ok(pid) = parts[1].parse::<i32>() {
-                            println!("Registering PID: {}", pid);
+                            info!("Registering PID: {}", pid);
                             match Profiler::new_instruction_counter(pid) {
                                 Ok(p) => {
                                     p.enable(); // Start profiling immediately
@@ -80,6 +90,7 @@ fn handle_client(mut stream: UnixStream) {
                                     let _ = stream.write_all(b"OK\n");
                                 }
                                 Err(e) => {
+                                    error!("Failed to create profiler for PID {}: {}", pid, e);
                                     let msg = format!("ERROR {}\n", e);
                                     let _ = stream.write_all(msg.as_bytes());
                                 }
@@ -98,12 +109,13 @@ fn handle_client(mut stream: UnixStream) {
                         }
                     }
                     _ => {
+                        warn!("Unknown command received: {}", parts[0]);
                         let _ = stream.write_all(b"ERROR Unknown Command\n");
                     }
                 }
             }
             Err(e) => {
-                println!("Error reading from socket: {}", e);
+                error!("Error reading from socket: {}", e);
                 break;
             }
         }
