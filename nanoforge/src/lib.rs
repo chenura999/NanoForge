@@ -4,6 +4,7 @@ pub mod benchmark;
 pub mod benchmarker;
 pub mod compiler;
 pub mod cpu_features;
+pub mod ffi;
 pub mod hot_function;
 pub mod ir;
 pub mod jit_memory;

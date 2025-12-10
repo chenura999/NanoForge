@@ -4,11 +4,14 @@
 //! variant selection based on runtime feedback.
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 /// Size buckets for contextual decision making
 /// The AI learns different policies for different input sizes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SizeBucket {
     /// N < 32 - SIMD overhead dominates
     Tiny,
@@ -116,7 +119,7 @@ impl Default for OptimizationFeatures {
 ///
 /// Each variant is an "arm" with an unknown success probability.
 /// We model each arm with a Beta distribution and sample to select.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantBandit {
     /// Number of variants (arms)
     num_variants: usize,
@@ -250,6 +253,20 @@ impl VariantBandit {
         }
         println!("└──────────────────────┴───────────┴───────────┴───────────┘");
     }
+
+    /// Save bandit state to a JSON file
+    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize: {}", e))?;
+        fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+        Ok(())
+    }
+
+    /// Load bandit state from a JSON file
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let json = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        serde_json::from_str(&json).map_err(|e| format!("Failed to deserialize: {}", e))
+    }
 }
 
 /// Statistics for a single variant
@@ -318,7 +335,7 @@ fn sample_normal<R: Rng>(rng: &mut R) -> f64 {
 /// - Learns that small inputs → Scalar is better
 /// - Learns that large inputs → AVX2 is better
 /// - Discovers the decision boundary automatically!
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ContextualBandit {
     /// One bandit per size bucket
     bandits: HashMap<SizeBucket, VariantBandit>,
@@ -439,6 +456,38 @@ impl ContextualBandit {
                 }
             }
         }
+    }
+
+    /// Save contextual bandit state to a JSON file
+    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize: {}", e))?;
+        fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+        println!("💾 Saved AI knowledge to {:?}", path);
+        Ok(())
+    }
+
+    /// Load contextual bandit state from a JSON file
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let json = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        let bandit =
+            serde_json::from_str(&json).map_err(|e| format!("Failed to deserialize: {}", e))?;
+        println!("📂 Loaded AI knowledge from {:?}", path);
+        Ok(bandit)
+    }
+
+    /// Load from file if exists, otherwise create new
+    pub fn load_or_new(path: &Path, variant_names: Vec<String>) -> Self {
+        if path.exists() {
+            match Self::load_from_file(path) {
+                Ok(bandit) => return bandit,
+                Err(e) => {
+                    println!("⚠️  Failed to load saved knowledge: {}", e);
+                    println!("    Starting fresh...");
+                }
+            }
+        }
+        Self::new(variant_names)
     }
 }
 
