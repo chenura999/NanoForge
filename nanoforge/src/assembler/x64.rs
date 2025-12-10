@@ -172,6 +172,27 @@ impl CodeGenerator {
     }
 }
 
+// Helper to map NanoForge VReg to x64 HW Reg
+fn get_hw_reg(r: u8) -> u8 {
+    match r {
+        0 => 0,   // RAX
+        1 => 8,   // R8
+        2 => 9,   // R9
+        3 => 10,  // R10
+        4 => 11,  // R11
+        5 => 15,  // R15
+        6 => 1,   // RCX
+        7 => 3,   // RBX
+        8 => 12,  // R12
+        9 => 13,  // R13
+        10 => 14, // R14
+        11 => 7,  // RDI
+        12 => 6,  // RSI
+        13 => 2,  // RDX
+        _ => panic!("Reg {} not mapped to HW", r),
+    }
+}
+
 pub struct JitBuilder {
     ops: Assembler,
     labels: HashMap<String, DynamicLabel>,
@@ -215,7 +236,6 @@ impl JitBuilder {
         let label = self.get_label(name);
         let ops = &mut self.ops;
 
-        // test reg, reg to check for zero
         match cond_reg {
             0 => dynasm!(ops ; .arch x64 ; test rax, rax),
             1 => dynasm!(ops ; .arch x64 ; test r8, r8),
@@ -223,6 +243,11 @@ impl JitBuilder {
             3 => dynasm!(ops ; .arch x64 ; test r10, r10),
             4 => dynasm!(ops ; .arch x64 ; test r11, r11),
             5 => dynasm!(ops ; .arch x64 ; test r15, r15),
+            6 => dynasm!(ops ; .arch x64 ; test rcx, rcx),
+            7 => dynasm!(ops ; .arch x64 ; test rbx, rbx),
+            8 => dynasm!(ops ; .arch x64 ; test r12, r12),
+            9 => dynasm!(ops ; .arch x64 ; test r13, r13),
+            10 => dynasm!(ops ; .arch x64 ; test r14, r14),
             _ => panic!("Reg {} not supported for jnz", cond_reg),
         }
         dynasm!(ops ; .arch x64 ; jnz =>label);
@@ -232,12 +257,17 @@ impl JitBuilder {
         let ops = &mut self.ops;
         let get_hw = |r: u8| -> u8 {
             match r {
-                0 => 0, // RAX
-                1 => 8, // R8
-                2 => 9, // R9
+                0 => 0,
+                1 => 8,
+                2 => 9,
                 3 => 10,
                 4 => 11,
                 5 => 15,
+                6 => 1,
+                7 => 3,
+                8 => 12,
+                9 => 13,
+                10 => 14,
                 _ => panic!("Reg {}", r),
             }
         };
@@ -255,6 +285,11 @@ impl JitBuilder {
             3 => dynasm!(ops ; .arch x64 ; cmp r10, imm),
             4 => dynasm!(ops ; .arch x64 ; cmp r11, imm),
             5 => dynasm!(ops ; .arch x64 ; cmp r15, imm),
+            6 => dynasm!(ops ; .arch x64 ; cmp rcx, imm),
+            7 => dynasm!(ops ; .arch x64 ; cmp rbx, imm),
+            8 => dynasm!(ops ; .arch x64 ; cmp r12, imm),
+            9 => dynasm!(ops ; .arch x64 ; cmp r13, imm),
+            10 => dynasm!(ops ; .arch x64 ; cmp r14, imm),
             _ => panic!("Cmp {}, imm not supported", reg),
         }
     }
@@ -311,133 +346,174 @@ impl JitBuilder {
             3 => dynasm!(ops ; .arch x64 ; add r10, imm),
             4 => dynasm!(ops ; .arch x64 ; add r11, imm),
             5 => dynasm!(ops ; .arch x64 ; add r15, imm),
+            6 => dynasm!(ops ; .arch x64 ; add rcx, imm),
+            7 => dynasm!(ops ; .arch x64 ; add rbx, imm),
+            8 => dynasm!(ops ; .arch x64 ; add r12, imm),
+            9 => dynasm!(ops ; .arch x64 ; add r13, imm),
+            10 => dynasm!(ops ; .arch x64 ; add r14, imm),
             _ => panic!("Add Reg {} not supported", dest_reg),
         }
     }
     pub fn sub_reg_imm(&mut self, dest_reg: u8, imm: i32) {
-        println!("ASM: sub reg{}, {}", dest_reg, imm);
         let ops = &mut self.ops;
-        match dest_reg {
-            0 => dynasm!(ops ; .arch x64 ; sub rax, imm),
-            1 => dynasm!(ops ; .arch x64 ; sub r8, imm),
-            2 => dynasm!(ops ; .arch x64 ; sub r9, imm),
-            3 => dynasm!(ops ; .arch x64 ; sub r10, imm),
-            4 => dynasm!(ops ; .arch x64 ; sub r11, imm),
-            5 => dynasm!(ops ; .arch x64 ; sub r15, imm),
-            _ => panic!("Reg {} not supported", dest_reg),
-        }
+        let d = get_hw_reg(dest_reg);
+        dynasm!(ops ; .arch x64 ; sub Rq(d), imm);
     }
 
     pub fn mov_reg_imm(&mut self, dest_reg: u8, imm: i32) {
         let ops = &mut self.ops;
-        println!("ASM: mov reg{}, {}", dest_reg, imm);
-        match dest_reg {
-            0 => dynasm!(ops ; .arch x64 ; mov eax, imm),
-            1 => dynasm!(ops ; .arch x64 ; mov r8d, imm),
-            2 => dynasm!(ops ; .arch x64 ; mov r9d, imm),
-            3 => dynasm!(ops ; .arch x64 ; mov r10d, imm),
-            4 => dynasm!(ops ; .arch x64 ; mov r11d, imm),
-            5 => dynasm!(ops ; .arch x64 ; mov r15d, imm),
-            _ => panic!("Register {} not supported", dest_reg),
-        }
+        let d = get_hw_reg(dest_reg);
+        dynasm!(ops ; .arch x64 ; mov Rd(d), imm);
+    }
+
+    pub fn mov_reg_imm64(&mut self, dest_reg: u8, imm: u64) {
+        let ops = &mut self.ops;
+        let imm_val = imm as i64;
+        let d = get_hw_reg(dest_reg);
+        dynasm!(ops ; .arch x64 ; mov Rq(d), QWORD imm_val);
     }
 
     pub fn mov_reg_stack(&mut self, dest_reg: u8, offset: i32) {
         let ops = &mut self.ops;
-        let get_hw = |r: u8| -> u8 {
-            match r {
-                0 => 0,  // RAX
-                1 => 8,  // R8
-                2 => 9,  // R9
-                3 => 10, // R10
-                4 => 11, // R11
-                5 => 15, // R15
-                _ => panic!("Register {} not supported", r),
-            }
-        };
-        let d = get_hw(dest_reg);
-        dynasm!(ops ; .arch x64 ; mov Rd(d), [rbp + offset]);
+        let d = get_hw_reg(dest_reg);
+        dynasm!(ops ; .arch x64 ; mov Rq(d), [rbp + offset]);
     }
 
     pub fn mov_reg_reg(&mut self, dest_reg: u8, src_reg: u8) {
         let ops = &mut self.ops;
-        let get_hw = |r: u8| -> u8 {
-            match r {
-                0 => 0,  // RAX
-                1 => 8,  // R8
-                2 => 9,  // R9
-                3 => 10, // R10
-                4 => 11, // R11
-                5 => 15, // R15
-                _ => panic!("Register {} not supported", r),
-            }
-        };
-        let d = get_hw(dest_reg);
-        let s = get_hw(src_reg);
+        let d = get_hw_reg(dest_reg);
+        let s = get_hw_reg(src_reg);
         dynasm!(ops ; .arch x64 ; mov Rq(d), Rq(s));
     }
 
     pub fn add_reg_reg(&mut self, dest_reg: u8, src_reg: u8) {
-        println!("ASM: add reg{}, reg{}", dest_reg, src_reg);
         let ops = &mut self.ops;
-        let get_hw = |r: u8| -> u8 {
-            match r {
-                0 => 0,  // RAX
-                1 => 8,  // R8
-                2 => 9,  // R9
-                3 => 10, // R10
-                4 => 11, // R11
-                5 => 15, // R15
-                _ => panic!("Reg {}", r),
-            }
-        };
-        let d = get_hw(dest_reg);
-        let s = get_hw(src_reg);
+        let d = get_hw_reg(dest_reg);
+        let s = get_hw_reg(src_reg);
         dynasm!(ops ; .arch x64 ; add Rq(d), Rq(s));
+    }
+
+    pub fn sub_reg_reg(&mut self, dest_reg: u8, src_reg: u8) {
+        let ops = &mut self.ops;
+        let d = get_hw_reg(dest_reg);
+        let s = get_hw_reg(src_reg);
+        dynasm!(ops ; .arch x64 ; sub Rq(d), Rq(s));
+    }
+
+    // AVX2 Instructions
+    // VLoad: vmovdqu ymm, [base + index*8] (Wait, index*8 is for 64-bit pointers)
+    // Here we load 32 bytes (256 bits).
+    // The address calculation is standard SIB: [base + index * 1 (or 4?)]
+    // In NanoForge, all pointers are 64-bit aligned. `Alloc` returns `u64` (ptr).
+    // `A[i]` means `*(A + i*4)`? No, NanoForge likely treats `i` as index into what?
+    // In `parser.rs`: `Load` -> `dest = [base + index * 8]`.
+    // So NanoForge arrays are 64-bit integers (stride 8).
+    // AVX2 can load 4 x 64-bit integers (256 bits = 4 qwords).
+    // So stride for vector load should be 4 elements = 32 bytes.
+    // Address is strictly `base + index*8`.
+
+    // `vmovdqu destination, source`
+
+    pub fn vmovdqu_load(
+        &mut self,
+        dest_ymm: u8,
+        base_reg: u8,
+        index_reg: u8,
+        offset_elements: i32,
+    ) {
+        let ops = &mut self.ops;
+        let b = get_hw_reg(base_reg);
+        let i = get_hw_reg(index_reg);
+        let y = dest_ymm;
+        let disp = offset_elements * 8;
+        dynasm!(ops ; .arch x64 ; vmovdqu Ry(y), [Rq(b) + Rq(i) * 8 + disp]);
+    }
+
+    pub fn vmovdqu_store(
+        &mut self,
+        base_reg: u8,
+        index_reg: u8,
+        src_ymm: u8,
+        offset_elements: i32,
+    ) {
+        let ops = &mut self.ops;
+        let b = get_hw_reg(base_reg);
+        let i = get_hw_reg(index_reg);
+        let y = src_ymm;
+        let disp = offset_elements * 8;
+        dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + disp], Ry(y));
+    }
+
+    pub fn vpaddq(&mut self, dest_ymm: u8, src1_ymm: u8, src2_ymm: u8) {
+        let ops = &mut self.ops;
+        let d = dest_ymm;
+        let s1 = src1_ymm;
+        let s2 = src2_ymm;
+        dynasm!(ops ; .arch x64 ; vpaddq Ry(d), Ry(s1), Ry(s2));
+    }
+
+    pub fn mov_reg_index(&mut self, dest_reg: u8, base_reg: u8, index_reg: u8) {
+        let ops = &mut self.ops;
+        let d = get_hw_reg(dest_reg);
+        let b = get_hw_reg(base_reg);
+        let i = get_hw_reg(index_reg);
+        dynasm!(ops ; .arch x64 ; mov Rq(d), [Rq(b) + Rq(i) * 8]);
+    }
+
+    pub fn mov_index_reg(&mut self, base_reg: u8, index_reg: u8, src_reg: u8) {
+        let ops = &mut self.ops;
+        let b = get_hw_reg(base_reg);
+        let i = get_hw_reg(index_reg);
+        let s = get_hw_reg(src_reg);
+        dynasm!(ops ; .arch x64 ; mov [Rq(b) + Rq(i) * 8], Rq(s));
+    }
+
+    pub fn call_reg(&mut self, reg: u8) {
+        let ops = &mut self.ops;
+        let r = get_hw_reg(reg);
+        dynasm!(ops ; .arch x64 ; call Rq(r));
     }
 
     pub fn push_reg(&mut self, reg: u8) {
         let ops = &mut self.ops;
-        match reg {
-            0 => dynasm!(ops ; .arch x64 ; push rax),
-            1 => dynasm!(ops ; .arch x64 ; push r8),
-            2 => dynasm!(ops ; .arch x64 ; push r9),
-            3 => dynasm!(ops ; .arch x64 ; push r10),
-            4 => dynasm!(ops ; .arch x64 ; push r11),
-            5 => dynasm!(ops ; .arch x64 ; push r15),
-            _ => panic!("Register {} not supported", reg),
-        }
+        let r = get_hw_reg(reg);
+        dynasm!(ops ; .arch x64 ; push Rq(r));
     }
 
     pub fn pop_reg(&mut self, reg: u8) {
         let ops = &mut self.ops;
-        match reg {
-            0 => dynasm!(ops ; .arch x64 ; pop rax),
-            1 => dynasm!(ops ; .arch x64 ; pop r8),
-            2 => dynasm!(ops ; .arch x64 ; pop r9),
-            3 => dynasm!(ops ; .arch x64 ; pop r10),
-            4 => dynasm!(ops ; .arch x64 ; pop r11),
-            5 => dynasm!(ops ; .arch x64 ; pop r15),
-            _ => panic!("Register {} not supported", reg),
-        }
+        let r = get_hw_reg(reg);
+        dynasm!(ops ; .arch x64 ; pop Rq(r));
     }
 
     pub fn prologue(&mut self, stack_size: i32) {
-        println!("Emitting Prologue. Size: {}", stack_size);
         let ops = &mut self.ops;
+        let aligned_size = (stack_size + 15) & !15;
+
         dynasm!(ops
+            ; .arch x64
             ; push rbp
             ; mov rbp, rsp
-            ; sub rsp, 16 // Hardcoded for test
-            // Save Registers we use (R8..R11, R15)
-            // Even though R8..R11 are Caller-Saved in SysV, our internal ABI
-            // Use Rq() explicit codes to ensure REX prefixes
-            ; push Rq(8)  // R8
-            ; push Rq(9)  // R9
-            ; push Rq(10) // R10
-            ; push Rq(11) // R11
-            ; push Rq(15) // R15
+            // Save Callee-Saved Registers:
+            // R15 (Reg 5), RBX (Reg 7), R12 (8), R13 (9), R14 (10).
+            // 5 registers * 8 = 40 bytes.
+            // + RBP (8) + RetAddr (8) = 56 bytes.
+            // 56 % 16 = 8. Misaligned.
+            // We need to push 1 more or sub rsp, 8.
+            // Let's push one more? No, let's use sub.
+
+            ; push r15
+            ; push rbx
+            ; push r12
+            ; push r13
+            ; push r14
+
+            ; sub rsp, 8 // Align to 16
         );
+
+        if aligned_size > 0 {
+            dynasm!(ops ; .arch x64 ; sub rsp, aligned_size);
+        }
     }
 
     pub fn add_rsp(&mut self, offset: i32) {
@@ -448,16 +524,32 @@ impl JitBuilder {
     pub fn epilogue(&mut self) {
         let ops = &mut self.ops;
         dynasm!(ops
-            // Restore Registers (Reverse)
-            ; pop Rq(15)
-            ; pop Rq(11)
-            ; pop Rq(10)
-            ; pop Rq(9)
-            ; pop Rq(8)
-            ; mov rsp, rbp
+            ; .arch x64
+            ; lea rsp, [rbp - 40] // Point to R14 (Bottom of saved regs)
+            ; pop r14
+            ; pop r13
+            ; pop r12
+            ; pop rbx
+            ; pop r15
             ; pop rbp
             ; ret
         );
+    }
+
+    pub fn mov_rdi_imm(&mut self, imm: i32) {
+        let ops = &mut self.ops;
+        dynasm!(ops ; .arch x64 ; mov rdi, imm);
+    }
+
+    pub fn mov_rdi_reg(&mut self, src_reg: u8) {
+        let ops = &mut self.ops;
+        let s = get_hw_reg(src_reg);
+        dynasm!(ops ; .arch x64 ; mov rdi, Rq(s));
+    }
+
+    pub fn rdtsc(&mut self) {
+        let ops = &mut self.ops;
+        dynasm!(ops ; .arch x64 ; rdtsc);
     }
 
     pub fn ret(&mut self) {

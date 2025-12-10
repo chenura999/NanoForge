@@ -3,7 +3,7 @@ use nanoforge::assembler::CodeGenerator;
 use nanoforge::compiler::Compiler;
 use nanoforge::hot_function::HotFunction;
 use nanoforge::jit_memory::DualMappedMemory;
-use nanoforge::optimizer::Optimizer;
+
 use nanoforge::parser::Parser as NanoParser;
 use nanoforge::profiler::Profiler;
 use std::io::{self, Write};
@@ -36,9 +36,21 @@ enum Commands {
     /// Start the interactive REPL
     Repl,
     /// Run a script file
-    Run { file: String },
+    Run {
+        file: String,
+        #[arg(short, long, default_value_t = 3)]
+        level: u8,
+    },
     /// Run the internal demo/benchmark
     Demo,
+    /// Benchmark a script file (10k iterations)
+    Benchmark {
+        file: String,
+        #[arg(short, long, default_value_t = 3)]
+        level: u8,
+    },
+    /// Run Adaptive Optimization Demo
+    Adaptive { file: String },
 }
 
 fn main() {
@@ -52,8 +64,16 @@ fn main() {
 
     match &args.command {
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Run { file }) => run_file(file),
+        Some(Commands::Run { file, level }) => run_file(file, *level),
         Some(Commands::Demo) => run_demo(&args),
+        Some(Commands::Benchmark { file, level }) => {
+            let script = std::fs::read_to_string(file).expect("Failed to read file");
+            // Default level 2 for explicit benchmark
+            if let Err(e) = nanoforge::benchmark::run_benchmark(&script, 10_000, *level) {
+                println!("Benchmark Error: {}", e);
+            }
+        }
+        Some(Commands::Adaptive { file }) => run_adaptive(file),
         None => run_repl(), // Default to REPL if no args
     }
 }
@@ -83,7 +103,7 @@ fn run_repl() {
             }
             "RUN" => {
                 println!("Compiling...");
-                execute_script(&buffer);
+                execute_script(&buffer, 3).unwrap_or_else(|e| println!("Execution Error: {}", e));
                 buffer.clear();
             }
             _ => {
@@ -93,20 +113,20 @@ fn run_repl() {
     }
 }
 
-fn run_file(path: &str) {
+fn run_file(path: &str, level: u8) {
     let content = std::fs::read_to_string(path).expect("Failed to read file");
-    match execute_script(&content) {
+    match execute_script(&content, level) {
         Ok(_) => {}
         Err(e) => println!("Error: {}", e),
     }
 }
 
-fn execute_script(script: &str) -> Result<(), String> {
+fn execute_script(script: &str, level: u8) -> Result<(), String> {
     let mut parser = NanoParser::new();
     match parser.parse(script) {
         Ok(prog) => {
             let (code, main_offset) =
-                Compiler::compile_program(&prog).map_err(|e| format!("{}", e))?;
+                Compiler::compile_program(&prog, level).map_err(|e| format!("{}", e))?;
 
             // Debug Dump
             std::fs::write("debug.bin", &code).expect("Failed to write debug.bin");
@@ -123,6 +143,79 @@ fn execute_script(script: &str) -> Result<(), String> {
         }
         Err(e) => Err(format!("Parsing Error: {}", e)),
     }
+}
+
+fn run_adaptive(path: &str) {
+    println!("=== NanoForge Adaptive Runtime ===");
+    let script = std::fs::read_to_string(path).expect("Failed to read file");
+    let mut parser = NanoParser::new();
+    let prog_ir = parser.parse(&script).expect("Parse failed");
+
+    // Constants for Metric Calculation
+    // Assuming vec_add_stress.nf: 100 * 10,000 = 1,000,000 Ops per Call
+    const OPS_PER_CALL: f64 = 1_000_000.0;
+    const CLOCK_SPEED: f64 = 4_000_000_000.0; // 4.0 GHz reference
+
+    // Phase 1: Tier 1 (Scalar / Level 2)
+    print!("Running Tier 1 (Scalar)... ");
+    io::stdout().flush().unwrap();
+
+    let (code_base, main_offset_base) =
+        Compiler::compile_program(&prog_ir, 2).expect("Compile failed");
+    let mem_base = DualMappedMemory::new(code_base.len() + 4096).unwrap();
+    CodeGenerator::emit_to_memory(&mem_base, &code_base, 0);
+
+    let mut current_fn: extern "C" fn() -> i64 =
+        unsafe { std::mem::transmute(mem_base.rx_ptr.add(main_offset_base)) };
+
+    // Warmup
+    for _ in 0..10 {
+        std::hint::black_box(current_fn());
+    }
+
+    // Measure Tier 1
+    let iterations = 100;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        std::hint::black_box(current_fn());
+    }
+    let dur_t1 = start.elapsed();
+    let cyc_op_t1 = (dur_t1.as_secs_f64() * CLOCK_SPEED) / (iterations as f64 * OPS_PER_CALL);
+
+    println!("{:.2} cycles/op", cyc_op_t1);
+
+    // Phase 2: Optimization Trigger
+    println!("\n🔥 HOT SWAP TRIGGERED 🔥\n");
+
+    // Compile Tier 2 (Vector / Level 3)
+    print!("Running Tier 2 (AVX2)... ");
+    io::stdout().flush().unwrap();
+
+    let (code_opt, main_offset_opt) =
+        Compiler::compile_program(&prog_ir, 3).expect("Compile failed");
+    let mem_opt = DualMappedMemory::new(code_opt.len() + 4096).unwrap();
+    CodeGenerator::emit_to_memory(&mem_opt, &code_opt, 0);
+    let fn_opt: extern "C" fn() -> i64 =
+        unsafe { std::mem::transmute(mem_opt.rx_ptr.add(main_offset_opt)) };
+
+    // Warmup
+    for _ in 0..10 {
+        std::hint::black_box(fn_opt());
+    }
+
+    // Measure Tier 2
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        std::hint::black_box(fn_opt());
+    }
+    let dur_t2 = start.elapsed();
+    let cyc_op_t2 = (dur_t2.as_secs_f64() * CLOCK_SPEED) / (iterations as f64 * OPS_PER_CALL);
+
+    println!("{:.2} cycles/op", cyc_op_t2);
+
+    // Final Report
+    let speedup = dur_t1.as_secs_f64() / dur_t2.as_secs_f64();
+    println!("\nSpeedup: {:.2}x", speedup);
 }
 
 fn run_demo(args: &Args) {
@@ -175,13 +268,14 @@ fn run_demo(args: &Args) {
         };
 
     // --- Step 3: Start Optimizer ---
-    let optimizer = Optimizer::new(
-        hot_func.clone(),
-        profiler.clone(),
-        args.threshold_unrolled,
-        args.threshold_avx2,
-    );
-    optimizer.start_background_thread();
+    // --- Step 3: Start Optimizer ---
+    // let optimizer = Optimizer::new(
+    //     hot_func.clone(),
+    //     profiler.clone(),
+    //     args.threshold_unrolled,
+    //     args.threshold_avx2,
+    // );
+    // optimizer.start_background_thread();
 
     // --- Step 4: Workload ---
     info!("Starting workload (Summing 0..1000 repeatedly)...");

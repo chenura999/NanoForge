@@ -26,13 +26,22 @@ impl Parser {
 
         while i < chars.len() {
             let c = chars[i];
+
+            if c == '#' {
+                // Comment: skip until newline
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+
             if c.is_whitespace() {
                 if !current.is_empty() {
                     tokens.push(current.clone());
                     current.clear();
                 }
                 i += 1;
-            } else if "(){},=+-".contains(c) {
+            } else if "(){},=+-[]:".contains(c) {
                 if !current.is_empty() {
                     tokens.push(current.clone());
                     current.clear();
@@ -130,6 +139,10 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, String> {
         self.expect("fn")?;
+        // Reset symbol table for new function
+        self.symbol_table.clear();
+        self.next_reg = 10; // Reserve 0..9 for Special/Phys Regs
+
         let name = self.consume().ok_or("Expected function name")?;
         self.expect("(")?;
 
@@ -142,28 +155,22 @@ impl Parser {
                 self.consume();
                 continue;
             }
-            args.push(self.consume().unwrap());
+            let arg_name = self.consume().unwrap();
+            args.push(arg_name);
         }
-        self.expect(")")?;
+        self.consume(); // )
         self.expect("{")?;
-
-        // Reset symbol table for new function
-        self.symbol_table.clear();
-        self.next_reg = 1; // 0 is Ret
 
         let mut func = Function::new(&name, args.clone());
 
-        for (i, arg) in args.iter().enumerate() {
-            let dest_reg = self.get_or_alloc_reg(arg);
-            // Assign arguments to registers using Stack Loading
-            // Arguments are pushed by caller.
-            // Stack: [Old RBP] [Ret Addr] [Arg 0] [Arg 1] ...
-            // Arg 0 is at RBP + 16.
-            // We use LoadArg opcode which Compiler translates to mov reg, [rbp + offset]
+        // Emit Moves for Args: ArgName(NewReg) <- PhysArg(1..4)
+        for (i, arg_name) in args.iter().enumerate() {
+            let user_reg = self.get_or_alloc_reg(arg_name);
+            let phys_proxy = (i + 1) as u8;
             func.push(Instruction {
-                op: Opcode::LoadArg(i),
-                dest: Some(Operand::Reg(dest_reg)),
-                src1: None,
+                op: Opcode::Mov,
+                dest: Some(Operand::Reg(user_reg)),
+                src1: Some(Operand::Reg(phys_proxy)),
                 src2: None,
             });
         }
@@ -226,6 +233,19 @@ impl Parser {
                     src2: None,
                 });
             }
+            "free" => {
+                // free(ptr)
+                self.expect("(")?;
+                let ptr_token = self.consume().ok_or("Expected pointer")?;
+                let ptr_op = self.parse_operand(&ptr_token);
+                self.expect(")")?;
+                func.push(Instruction {
+                    op: Opcode::Free,
+                    dest: None,
+                    src1: Some(ptr_op),
+                    src2: None,
+                });
+            }
             "if" => {
                 // if x goto L
                 // if x == y goto L
@@ -280,59 +300,125 @@ impl Parser {
                 }
             }
             _ => {
-                // Assignment `x = ...`
+                // Assignment `x = ...` or Store `x[i] = ...` or Label `l:`
                 let dest_name = t;
+
+                // Check for Label: `name:`
+                if self.peek() == Some(&":".to_string()) {
+                    self.consume(); // :
+                    func.push(Instruction {
+                        op: Opcode::Label,
+                        dest: Some(Operand::Label(dest_name)),
+                        src1: None,
+                        src2: None,
+                    });
+                    return Ok(());
+                }
+
+                // Check for Array Store: `dest[i] = val`
+                if self.peek() == Some(&"[".to_string()) {
+                    self.consume(); // [
+                    let index_token = self.consume().ok_or("Expected index")?;
+                    let index_op = self.parse_operand(&index_token);
+                    self.expect("]")?;
+
+                    self.expect("=")?;
+
+                    let val_token = self.consume().ok_or("Expected value")?;
+                    let val_op = self.parse_operand(&val_token);
+
+                    let base_reg = self.get_or_alloc_reg(&dest_name);
+
+                    func.push(Instruction {
+                        op: Opcode::Store,
+                        dest: Some(Operand::Reg(base_reg)), // Base
+                        src1: Some(index_op),               // Index
+                        src2: Some(val_op),                 // Value
+                    });
+                    return Ok(());
+                }
+
                 let eq = self.consume().ok_or("Expected =")?;
                 if eq != "=" {
                     return Err(format!("Expected =, found {}", eq));
                 }
 
-                // RHS: `val` or `val + val` or `func(arg...)`
+                // RHS: `val` or `val + val` or `func(arg...)` or `arr[i]` or `alloc(N)`
                 let token1 = self.consume().ok_or("Expected RHS")?;
-                // Check if it's a call
-                // Peek next. If `(`, it's a call.
-                if self.peek() == Some(&"(".to_string()) {
-                    // Call: name ( args )
-                    let func_name = token1;
+
+                // Check for Array Load: `y = x[i]`
+                if self.peek() == Some(&"[".to_string()) {
+                    self.consume(); // [
+                    let index_token = self.consume().ok_or("Expected index")?;
+                    let index_op = self.parse_operand(&index_token);
+                    self.expect("]")?;
+
+                    let base_reg = self.get_or_alloc_reg(&token1); // token1 is array name
+                    let dest_reg = self.get_or_alloc_reg(&dest_name);
+
+                    func.push(Instruction {
+                        op: Opcode::Load,
+                        dest: Some(Operand::Reg(dest_reg)),
+                        src1: Some(Operand::Reg(base_reg)),
+                        src2: Some(index_op),
+                    });
+                    let _func_name = token1;
+
+                // Check if RHS is a Call: `x = func(...)`
+                } else if self.peek() == Some(&"(".to_string()) {
                     self.consume(); // (
+
+                    // Handle Intrinsics
+                    if token1 == "alloc" {
+                        // Use token1 as func_name
+                        // alloc(size)
+                        let size_token = self.consume().ok_or("Expected size")?;
+                        let size_op = self.parse_operand(&size_token);
+                        self.expect(")")?;
+                        let dest_reg = self.get_or_alloc_reg(&dest_name);
+                        func.push(Instruction {
+                            op: Opcode::Alloc,
+                            dest: Some(Operand::Reg(dest_reg)),
+                            src1: Some(size_op),
+                            src2: None,
+                        });
+                        return Ok(());
+                    }
+
+                    // Generic Call
                     let mut args = Vec::new();
-                    while let Some(at) = self.peek() {
-                        if at == ")" {
+                    while let Some(t) = self.peek() {
+                        if t == ")" {
                             break;
                         }
-                        if at == "," {
+                        if t == "," {
                             self.consume();
                             continue;
                         }
-                        args.push(self.consume().unwrap());
+                        // Arg can be operand (imm/var)
+                        let arg_tok = self.consume().unwrap();
+                        args.push(self.parse_operand(&arg_tok));
                     }
-                    self.consume(); // )
+                    self.expect(")")?;
 
-                    for (i, arg_token) in args.iter().enumerate() {
-                        let arg_op = self.parse_operand(arg_token);
-                        let target_reg = (i + 1) as u8;
+                    for (i, arg) in args.iter().enumerate() {
+                        let arg_phys_vreg = (i + 1) as u8;
                         func.push(Instruction {
-                            op: Opcode::Mov,
-                            dest: Some(Operand::Reg(target_reg)),
-                            src1: Some(arg_op),
+                            op: Opcode::SetArg(i),
+                            dest: Some(Operand::Reg(arg_phys_vreg)), // Defines R8..R11
+                            src1: Some(arg.clone()),
                             src2: None,
                         });
                     }
 
-                    func.push(Instruction {
-                        op: Opcode::Call,
-                        dest: None,
-                        src1: Some(Operand::Label(func_name)),
-                        src2: None,
-                    });
-
                     let dest_reg = self.get_or_alloc_reg(&dest_name);
                     func.push(Instruction {
-                        op: Opcode::Mov,
+                        op: Opcode::Call,
                         dest: Some(Operand::Reg(dest_reg)),
-                        src1: Some(Operand::Reg(0)),
+                        src1: Some(Operand::Label(token1)), // Use token1 as func_name
                         src2: None,
                     });
+                    return Ok(());
                 } else if self
                     .peek()
                     .map(|s| "+-*/".contains(s) || s == "+" || s == "-")
@@ -399,7 +485,7 @@ mod tests {
         ";
         let mut parser = Parser::new();
         let prog = parser.parse(script).expect("Parsing failed");
-        let (code, main_offset) = Compiler::compile_program(&prog).expect("Compilation failed");
+        let (code, main_offset) = Compiler::compile_program(&prog, 0).expect("Compilation failed");
 
         // Emitting 'main' (last func usually? or we need entry point)
         // With compile_program, code contains ALL functions.
@@ -429,7 +515,7 @@ mod tests {
             return sum";
         let mut parser = Parser::new();
         let prog = parser.parse(script).expect("Parsing failed");
-        let code = Compiler::compile_program(&prog).expect("Compilation failed");
+        let code = Compiler::compile_program(&prog, 0).expect("Compilation failed");
         let memory = DualMappedMemory::new(4096).unwrap();
         CodeGenerator::emit_to_memory(&memory, &code.0, 0);
         let func_ptr: extern "C" fn() -> i64 = unsafe { std::mem::transmute(memory.rx_ptr) };
@@ -452,7 +538,7 @@ mod tests {
         ";
         let mut parser = Parser::new();
         let prog = parser.parse(script).expect("Parsing failed");
-        let code = Compiler::compile_program(&prog).expect("Compilation failed");
+        let code = Compiler::compile_program(&prog, 0).expect("Compilation failed");
         let memory = DualMappedMemory::new(4096).unwrap();
         CodeGenerator::emit_to_memory(&memory, &code.0, 0);
         let func_ptr: extern "C" fn() -> i64 = unsafe { std::mem::transmute(memory.rx_ptr) };

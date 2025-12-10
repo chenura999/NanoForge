@@ -1,4 +1,5 @@
 pub mod assembler;
+pub mod benchmark;
 pub mod benchmarker;
 pub mod compiler;
 pub mod hot_function;

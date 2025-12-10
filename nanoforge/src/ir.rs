@@ -1,12 +1,9 @@
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operand {
-    /// A virtual register (0..N).
-    /// For the trivial allocator, these map directly to hardware registers.
-    Reg(u8),
-    /// An immediate integer constant.
-    Imm(i32),
-    /// A label for jump targets.
-    Label(String),
+    Reg(u8),       // Virtual Integer Register
+    Ymm(u8),       // Virtual Vector Register (AVX2)
+    Imm(i32),      // Immediate value
+    Label(String), // Label name
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +20,15 @@ pub enum Opcode {
     Label,
     /// Unconditional Jump
     Jmp,
+    /// Alloc(dest, size) -> dest = malloc(size)
+    Alloc,
+    /// Free(ptr) -> free(ptr)
+    Free,
+    /// Load(dest, base, index) -> dest = MEM[base + index * 8]
+    Load,
+    /// Store(base, index, src) -> MEM[base + index * 8] = src
+    Store,
+    SetArg(usize), // Set Argument i for Call
     /// Jump if Not Zero (Legacy, kept for sugar or simple checks)
     Jnz,
     /// Compare two operands (sets flags)
@@ -43,6 +49,12 @@ pub enum Opcode {
     Call,
     /// Load Argument from Stack (index 0-based)
     LoadArg(usize),
+    /// VLoad(ymm_dest, base, index) -> ymm_dest = MEM[base + index * 8] (Vector Load)
+    VLoad,
+    /// VStore(base, index, ymm_src) -> MEM[base + index * 8] = ymm_src (Vector Store)
+    VStore,
+    /// VAdd(ymm_dest, ymm_src1, ymm_src2) -> ymm_dest = ymm_src1 + ymm_src2 (Packed Add)
+    VAdd,
 }
 
 #[derive(Debug, Clone, PartialEq)]

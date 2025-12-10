@@ -1,38 +1,36 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assembler::x64::JitBuilder;
     use crate::jit_memory::DualMappedMemory;
-    use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
     use std::mem;
 
     #[test]
-    fn test_manual_register_integrity() {
-        let mut ops = dynasmrt::x64::Assembler::new().unwrap();
-        let offset = ops.offset();
+    fn test_rdtsc() {
+        let mut assembler = JitBuilder::new();
 
-        // Test R13 (Current Reg 1)
-        // mov r13d, 42
-        // mov eax, r13d
-        // ret
-        dynasm!(ops
-            ; .arch x64
-            ; mov r13d, 42
-            ; mov eax, r13d
-            ; ret
-        );
+        // rdtsc returns result in EDX:EAX (High:Low)
+        // We want to return RAX loop count.
+        assembler.rdtsc();
+        // Note: rdtsc clobbers RDX and RAX.
+        // Our function returns u32 via RAX (EAX).
+        // Since we return u32, we just read EAX.
 
-        let buf = ops.finalize().unwrap();
+        assembler.ret();
+
+        let code = assembler.finalize();
         let memory = DualMappedMemory::new(4096).unwrap();
+        crate::assembler::CodeGenerator::emit_to_memory(&memory, &code, 0);
 
-        // Copy to executable memory
-        unsafe {
-            std::ptr::copy_nonoverlapping(buf.as_ptr(), memory.rw_ptr, buf.len());
+        let func: extern "C" fn() -> u32 = unsafe { mem::transmute(memory.rx_ptr) };
+        let t1 = func();
+        // Busy wait a bit? No, just call again.
+        for _ in 0..1000 {
+            std::hint::spin_loop();
         }
-
-        let func: extern "C" fn() -> i32 = unsafe { mem::transmute(memory.rx_ptr) };
-        let result = func();
-
-        println!("Manual ASM R13 Result: {}", result);
-        assert_eq!(result, 42, "R13 failed to hold value in manual assembly");
+        let t2 = func();
+        println!("T1: {}, T2: {}", t1, t2);
+        assert!(t2 > t1, "TSC should increase");
+        assert!(t1 > 0, "TSC should be non-zero");
     }
 }
