@@ -114,21 +114,29 @@ impl Optimizer {
 }
 
 /// Python-exposed compiled function
+/// Stores the full CompiledVariant to keep the JIT memory alive
 #[pyclass]
 pub struct CompiledFunction {
-    func_ptr: extern "C" fn(u64) -> u64,
+    // Keep the variant alive to prevent the JIT memory from being freed
+    #[allow(dead_code)]
+    variant: crate::variant_generator::CompiledVariant,
 }
 
 #[pymethods]
 impl CompiledFunction {
     /// Execute the function with the given input
     pub fn execute(&self, input: u64) -> u64 {
-        (self.func_ptr)(input)
+        self.variant.execute(input)
     }
 
     /// Call the function (alias for execute)
     pub fn __call__(&self, input: u64) -> u64 {
         self.execute(input)
+    }
+
+    /// Get the variant name
+    pub fn name(&self) -> String {
+        self.variant.config.name.clone()
     }
 }
 
@@ -162,7 +170,7 @@ pub fn compile(source: &str) -> PyResult<CompiledFunction> {
         .map_err(|e| PyValueError::new_err(format!("Parse error: {}", e)))?;
 
     let generator = VariantGenerator::new();
-    let variants = generator
+    let mut variants = generator
         .generate_variants(&program)
         .map_err(|e| PyValueError::new_err(format!("Compile error: {}", e)))?;
 
@@ -170,9 +178,10 @@ pub fn compile(source: &str) -> PyResult<CompiledFunction> {
         return Err(PyValueError::new_err("No variants generated"));
     }
 
-    Ok(CompiledFunction {
-        func_ptr: variants[0].func_ptr,
-    })
+    // Take ownership of the first variant
+    let variant = variants.remove(0);
+
+    Ok(CompiledFunction { variant })
 }
 
 /// Get NanoForge version
