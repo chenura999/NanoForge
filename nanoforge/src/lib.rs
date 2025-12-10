@@ -12,6 +12,8 @@ pub mod optimizer;
 pub mod parser;
 pub mod profiler;
 pub mod protocol;
+#[cfg(feature = "python")]
+pub mod pybindings;
 pub mod safety;
 pub mod sandbox;
 pub mod variant_generator;
