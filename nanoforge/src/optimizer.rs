@@ -193,7 +193,7 @@ impl Optimizer {
             }
             if let Opcode::Jmp = instr.op {
                 if let Some(Operand::Label(target)) = &instr.dest {
-                    if let Some(start) = loop_start {
+                    if let Some(_start) = loop_start {
                         if target == &label_name {
                             loop_end = Some(idx);
                             break; // Found one loop

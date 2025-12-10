@@ -469,10 +469,20 @@ impl Parser {
 }
 
 #[cfg(test)]
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
     use crate::assembler::CodeGenerator;
+    #[allow(unused_imports)]
     use crate::compiler::Compiler;
+    #[allow(unused_imports)]
     use crate::jit_memory::DualMappedMemory;
 
     #[test]

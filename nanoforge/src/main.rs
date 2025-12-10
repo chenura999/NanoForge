@@ -165,7 +165,7 @@ fn run_adaptive(path: &str) {
     let mem_base = DualMappedMemory::new(code_base.len() + 4096).unwrap();
     CodeGenerator::emit_to_memory(&mem_base, &code_base, 0);
 
-    let mut current_fn: extern "C" fn() -> i64 =
+    let current_fn: extern "C" fn() -> i64 =
         unsafe { std::mem::transmute(mem_base.rx_ptr.add(main_offset_base)) };
 
     // Warmup

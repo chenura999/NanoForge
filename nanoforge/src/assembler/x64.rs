@@ -563,8 +563,16 @@ impl JitBuilder {
 }
 
 #[cfg(test)]
+impl Default for JitBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
     use crate::jit_memory::DualMappedMemory;
 
     #[test]

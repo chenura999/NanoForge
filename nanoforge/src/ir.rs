@@ -102,3 +102,9 @@ impl Program {
         self.functions.push(func);
     }
 }
+
+impl Default for Program {
+    fn default() -> Self {
+        Self::new()
+    }
+}

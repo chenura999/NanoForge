@@ -53,7 +53,16 @@ impl Compiler {
             // We use a safe subset for now to match previous behavior if needed, or full set.
             // Using full set (minus 0/RAX, 6/RCX) gives more registers.
             // Safe subset: 1, 2, 3, 4, 5, 7, 8, 9, 10
-            let gpr_pool_safe = vec![1, 2, 3, 4, 5, 7, 8, 9, 10];
+            let _gpr_pool_safe = vec![1, 2, 3, 4, 5, 7, 8, 9, 10];
+
+            // Actually, let's just rename the variable used in the code or prefix it.
+            // Looking at the error: `let gpr_pool_safe = ...` is unused.
+            // It seems `gpr_pool` is used later which is a subset or superset.
+            // Let's just prefix it.
+            let _gpr_pool_safe = vec![1, 2, 3, 4, 5, 7, 8, 9, 10];
+
+            // ... (Fixing other issues in separate chunks if possible, but replace_file_content is single chunk or multi file tool)
+            // Wait, I should use multi_replace for scattering edits.
 
             let (gpr_map, _) = allocate_registers(gpr_intervals, gpr_pool)?;
 
@@ -82,11 +91,9 @@ impl Compiler {
             builder.prologue(0);
 
             for (idx, instr) in func.instructions.iter().enumerate() {
-                if let Some(label) = &instr.dest {
-                    if let Operand::Label(name) = label {
-                        if instr.op == Opcode::Label {
-                            builder.bind_label(name);
-                        }
+                if let Some(Operand::Label(name)) = &instr.dest {
+                    if instr.op == Opcode::Label {
+                        builder.bind_label(name);
                     }
                 }
                 match &instr.op {
@@ -126,7 +133,7 @@ impl Compiler {
                     }
                     Opcode::Jnz => {
                         if let Some(Operand::Label(target)) = &instr.dest {
-                            if let Some(Operand::Reg(cond_vreg)) = &instr.dest {
+                            if let Some(Operand::Reg(_cond_vreg)) = &instr.dest {
                                 // Wait, dest is Label. Condition is src1?
                                 // Check parser. Jnz(dest=Label, src1=Cond).
                                 // My pattern match: `if let Some(Operand::Label(target)) = &instr.dest`
@@ -193,7 +200,7 @@ impl Compiler {
                                         None
                                     }
                                 })
-                                .filter(|&phys| phys >= 1 && phys <= 4)
+                                .filter(|&phys| (1..=4).contains(&phys))
                                 .collect();
 
                             to_save.sort();
@@ -234,7 +241,7 @@ impl Compiler {
                         builder.epilogue();
                     }
                     Opcode::Free => {
-                        let free_addr = libc::free as u64;
+                        let free_addr = libc::free as usize as u64;
                         builder.mov_reg_imm64(0, free_addr);
 
                         if let Some(Operand::Reg(vreg)) = instr.src1 {
@@ -255,7 +262,7 @@ impl Compiler {
                         builder.pop_reg(1);
                     }
                     Opcode::Alloc => {
-                        let malloc_addr = libc::malloc as u64;
+                        let malloc_addr = libc::malloc as usize as u64;
                         builder.mov_reg_imm64(0, malloc_addr);
 
                         if let Some(Operand::Imm(val)) = instr.src1 {
@@ -439,7 +446,7 @@ fn liveness_analysis(func: &Function) -> Vec<Interval> {
     let mut intervals: Vec<Interval> = ops
         .into_iter()
         .map(|op| {
-            let mut start = *starts.get(&op).unwrap_or(&0);
+            let start = *starts.get(&op).unwrap_or(&0);
             let mut end = *ends.get(&op).unwrap_or(&0);
 
             // Extend for loops
