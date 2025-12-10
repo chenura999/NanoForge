@@ -39,94 +39,123 @@ impl Optimizer {
         }
     }
 
-    pub fn start_background_thread(self) {
+    pub fn start_background_thread(mut self) {
         thread::spawn(move || {
             info!("Optimizer: Background thread started.");
             let mut current_level = OptimizationLevel::Baseline;
 
             loop {
                 thread::sleep(Duration::from_millis(100));
+                self.optimize_step(&mut current_level);
+            }
+        });
+    }
 
-                let count = self.profiler.read();
+    fn optimize_step(&mut self, current_level: &mut OptimizationLevel) {
+        let count = self.profiler.read();
 
-                if current_level == OptimizationLevel::Baseline && count > self.optimization_trigger
-                {
-                    info!(
-                        "Optimizer: Trigger reached ({} > {}). Starting Benchmark Sandbox...",
-                        count, self.optimization_trigger
-                    );
+        // Check if we should optimize
+        if matches!(current_level, OptimizationLevel::Baseline) && count > self.optimization_trigger
+        {
+            info!(
+                "Optimization trigger reached ({} > {})",
+                count, self.optimization_trigger
+            );
 
-                    // 1. Generate Candidates
-                    let mut candidates = Vec::new();
+            let start = std::time::Instant::now();
 
-                    // Candidate A: Unrolled Loop
-                    if let Ok(code) = CodeGenerator::generate_sum_loop_unrolled() {
+            // 1. Generate Candidates
+            let mut candidates = Vec::new();
+
+            // Candidate A: Unrolled Loop
+            if let Ok(code) = CodeGenerator::generate_sum_loop_unrolled() {
+                candidates.push(Candidate {
+                    name: "Unrolled Loop".to_string(),
+                    code,
+                });
+            }
+
+            // Candidate B: SIMD Vectorization
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    if let Ok(code) = CodeGenerator::generate_sum_avx2() {
                         candidates.push(Candidate {
-                            name: "Unrolled Loop".to_string(),
+                            name: "AVX2 SIMD".to_string(),
                             code,
                         });
                     }
-
-                    // Candidate B: AVX2 (if supported)
-                    if is_x86_feature_detected!("avx2") {
-                        if let Ok(code) = CodeGenerator::generate_sum_avx2() {
-                            candidates.push(Candidate {
-                                name: "AVX2 SIMD".to_string(),
-                                code,
-                            });
-                        }
-                    }
-
-                    if candidates.is_empty() {
-                        info!("Optimizer: No candidates available.");
-                        current_level = OptimizationLevel::Optimized; // Stop trying
-                        continue;
-                    }
-
-                    // 2. Race Candidates
-                    let mut best_candidate: Option<&Candidate> = None;
-                    let mut best_score = u64::MAX;
-
-                    let page_size = 4096;
-                    // We need a temporary memory to run benchmarks
-                    let sandbox_mem =
-                        DualMappedMemory::new(page_size).expect("Sandbox alloc failed");
-
-                    for candidate in &candidates {
-                        // Emit candidate code to sandbox
-                        CodeGenerator::emit_to_memory(&sandbox_mem, &candidate.code, 0);
-
-                        // Get function pointer
-                        let func: extern "C" fn(u64) -> u64 =
-                            unsafe { std::mem::transmute(sandbox_mem.rx_ptr) };
-
-                        // Measure
-                        // Input 1000, 1000 iterations
-                        let cycles = unsafe { Benchmarker::measure(func, 1000, 1000) };
-
-                        info!(
-                            "Optimizer: Candidate '{}' -> {} cycles/iter",
-                            candidate.name, cycles
-                        );
-
-                        if cycles < best_score {
-                            best_score = cycles;
-                            best_candidate = Some(candidate);
-                        }
-                    }
-
-                    // 3. Pick Winner
-                    if let Some(winner) = best_candidate {
-                        info!(
-                            "Optimizer: Winner is '{}' with {} cycles.",
-                            winner.name, best_score
-                        );
-                        self.apply_optimization(&winner.code);
-                        current_level = OptimizationLevel::Optimized;
-                    }
                 }
             }
-        });
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                // Most aarch64 chips have NEON. We can default to trying it,
+                // or check specific features if needed (e.g. std::arch::is_aarch64_feature_detected!("neon")).
+                // Standard NEON is baseline for aarch64.
+                if let Ok(code) = CodeGenerator::generate_sum_neon() {
+                    candidates.push(Candidate {
+                        name: "NEON SIMD".to_string(),
+                        code,
+                    });
+                }
+            }
+
+            if candidates.is_empty() {
+                info!("Optimizer: No candidates available.");
+                *current_level = OptimizationLevel::Optimized; // Stop trying
+                metrics::counter!("optimization_skip_total", 1, "reason" => "no_candidates");
+                return;
+            }
+
+            // 2. Race them in the Sandbox
+            let mut best_candidate: Option<&Candidate> = None;
+            let mut min_cycles = u64::MAX;
+
+            let page_size = 4096;
+            // We need a temporary memory to run benchmarks
+            let sandbox_mem = DualMappedMemory::new(page_size).expect("Sandbox alloc failed");
+
+            for candidate in &candidates {
+                // Emit candidate code to sandbox
+                CodeGenerator::emit_to_memory(&sandbox_mem, &candidate.code, 0);
+
+                // Get function pointer
+                let func: extern "C" fn(u64) -> u64 =
+                    unsafe { std::mem::transmute(sandbox_mem.rx_ptr) };
+
+                // Measure
+                // Input 1000, 1000 iterations
+                let cycles = unsafe { Benchmarker::measure(func, 1000, 1000) };
+
+                info!(
+                    "Optimizer: Candidate '{}' -> {} cycles/iter",
+                    candidate.name, cycles
+                );
+
+                if cycles < min_cycles {
+                    min_cycles = cycles;
+                    best_candidate = Some(candidate);
+                }
+            }
+
+            // 3. Apply the Winner
+            if let Some(winner) = best_candidate {
+                info!(
+                    "Optimizer: Winner is '{}' with {} cycles. Hot-swapping now!",
+                    winner.name, min_cycles
+                );
+                self.apply_optimization(&winner.code);
+                *current_level = OptimizationLevel::Optimized;
+
+                metrics::counter!("optimization_success_total", 1, "strategy" => winner.name.clone());
+            } else {
+                metrics::counter!("optimization_skip_total", 1, "reason" => "no_winner");
+            }
+
+            let duration = start.elapsed();
+            metrics::histogram!("jit_compilation_duration_seconds", duration.as_secs_f64());
+        }
     }
 
     fn apply_optimization(&self, code: &[u8]) {

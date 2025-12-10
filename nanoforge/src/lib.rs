@@ -1,8 +1,11 @@
 pub mod assembler;
 pub mod benchmarker;
+pub mod compiler;
 pub mod hot_function;
+pub mod ir;
 pub mod jit_memory;
 pub mod optimizer;
+pub mod parser;
 pub mod profiler;
 pub mod protocol;
 pub mod safety;

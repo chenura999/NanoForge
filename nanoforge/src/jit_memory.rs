@@ -82,6 +82,41 @@ impl DualMappedMemory {
                 std::arch::asm!("mfence", options(nostack));
             }
 
+            #[cfg(target_arch = "aarch64")]
+            {
+                // Aarch64 Cache Coherency:
+                // 1. Clean data cache by VA to PoU (Point of Unification)
+                // 2. Invalidate instruction cache by VA to PoU
+                // 3. ISB (Instruction Synchronization Barrier) to ensure fetch pipeline sees it.
+
+                let start = self.rx_ptr as usize;
+                let end = start + self.size;
+                // Cache line size is usually 64 bytes (CTR_EL0), but we'll iterate.
+                // Ideally reading lookup size is better, but step of 64 is safe on modern ARM64.
+                // Or we can rely on system primitives.
+                // For this PoC, we do a loop.
+
+                let stride = 64;
+                let mut addr = start;
+                while addr < end {
+                    // DC CVAU: Data Cache Clean by VA to Point of Unification
+                    std::arch::asm!("dc cvau, {0}", in(reg) addr);
+                    addr += stride;
+                }
+
+                std::arch::asm!("dsb ish"); // Data Synchronization Barrier (Inner Shareable)
+
+                addr = start;
+                while addr < end {
+                    // IC IVAU: Instruction Cache Invalidate by VA to Point of Unification
+                    std::arch::asm!("ic ivau, {0}", in(reg) addr);
+                    addr += stride;
+                }
+
+                std::arch::asm!("dsb ish"); // Ensure IC invalidation completes
+                std::arch::asm!("isb"); // Instruction Synchronization Barrier (Flush pipeline)
+            }
+
             // Ideally we would use:
             // extern "C" { fn __clear_cache(start: *mut c_void, end: *mut c_void); }
             // __clear_cache(self.rx_ptr as *mut _, self.rx_ptr.add(self.size) as *mut _);
