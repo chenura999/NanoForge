@@ -446,6 +446,7 @@ impl ContextualBandit {
 ///
 /// Uses features to predict which variant will perform best
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ContextualSelector {
     /// Number of features
     num_features: usize,
