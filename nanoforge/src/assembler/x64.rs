@@ -562,7 +562,6 @@ impl JitBuilder {
     }
 }
 
-#[cfg(test)]
 impl Default for JitBuilder {
     fn default() -> Self {
         Self::new()
