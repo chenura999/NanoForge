@@ -1,7 +1,11 @@
 // Re-export the appropriate CodeGenerator based on the architecture.
 
 #[cfg(target_arch = "x86_64")]
+pub mod avx512;
+#[cfg(target_arch = "x86_64")]
 pub mod x64;
+#[cfg(target_arch = "x86_64")]
+pub use self::avx512::Avx512Encoder;
 #[cfg(target_arch = "x86_64")]
 pub use self::x64::CodeGenerator;
 #[cfg(target_arch = "x86_64")]
