@@ -1,8 +1,12 @@
 use clap::{Parser, Subcommand};
+use nanoforge::ai_optimizer::{ContextualBandit, OptimizationFeatures, SizeBucket, VariantBandit};
 use nanoforge::assembler::CodeGenerator;
 use nanoforge::compiler::Compiler;
+use nanoforge::cpu_features::CpuFeatures;
 use nanoforge::hot_function::HotFunction;
 use nanoforge::jit_memory::DualMappedMemory;
+use nanoforge::sandbox::{NanosecondSandbox, SandboxConfig};
+use nanoforge::variant_generator::VariantGenerator;
 
 use nanoforge::parser::Parser as NanoParser;
 use nanoforge::profiler::Profiler;
@@ -51,6 +55,22 @@ enum Commands {
     },
     /// Run Adaptive Optimization Demo
     Adaptive { file: String },
+    /// Run SOAE (Self-Optimizing Assembly Engine) Demo
+    Soae { file: String },
+    /// Run SOAE with AI-Powered Variant Selection
+    SoaeAi {
+        file: String,
+        /// Number of learning iterations
+        #[arg(short, long, default_value_t = 50)]
+        iterations: u32,
+    },
+    /// Run SOAE with Contextual Bandit (learns decision boundaries)
+    SoaeContext {
+        file: String,
+        /// Number of learning iterations
+        #[arg(short, long, default_value_t = 100)]
+        iterations: u32,
+    },
 }
 
 fn main() {
@@ -74,6 +94,9 @@ fn main() {
             }
         }
         Some(Commands::Adaptive { file }) => run_adaptive(file),
+        Some(Commands::Soae { file }) => run_soae(file),
+        Some(Commands::SoaeAi { file, iterations }) => run_soae_ai(file, *iterations),
+        Some(Commands::SoaeContext { file, iterations }) => run_soae_context(file, *iterations),
         None => run_repl(), // Default to REPL if no args
     }
 }
@@ -300,4 +323,361 @@ fn run_demo(args: &Args) {
     profiler.disable();
     info!("Final Result: {}", total_result);
     info!("Phase 10 Complete.");
+}
+
+/// Self-Optimizing Assembly Engine (SOAE) Demo
+///
+/// This demonstrates the core SOAE concept:
+/// 1. Generate multiple code variants (Scalar, AVX2 with different unroll factors)
+/// 2. Benchmark all variants in the nanosecond sandbox
+/// 3. Select the fastest variant
+/// 4. Show comparative performance
+fn run_soae(path: &str) {
+    println!("\n╔══════════════════════════════════════════════════════════════╗");
+    println!("║     🔥 NanoForge SOAE (Self-Optimizing Assembly Engine) 🔥    ║");
+    println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+    // Detect CPU features
+    let cpu = CpuFeatures::detect();
+    println!("🖥️  CPU Features: {}\n", cpu.summary());
+
+    // Parse the source file
+    let script = std::fs::read_to_string(path).expect("Failed to read file");
+    let mut parser = NanoParser::new();
+    let program = parser.parse(&script).expect("Parse failed");
+
+    // Generate variants
+    println!("📦 Generating Code Variants...");
+    let generator = VariantGenerator::new();
+    let variants = generator
+        .generate_variants(&program)
+        .expect("Variant generation failed");
+
+    println!("   Generated {} variants:\n", variants.len());
+    for (i, v) in variants.iter().enumerate() {
+        println!(
+            "   {}. {} (opt level: {}, {} bytes)",
+            i + 1,
+            v.config.name,
+            v.config.optimization_level,
+            v.code_size
+        );
+    }
+
+    // Create sandbox and benchmark all variants
+    println!("\n⏱️  Benchmarking in Nanosecond Sandbox...\n");
+    let sandbox = NanosecondSandbox::new(SandboxConfig {
+        warmup_iterations: 50,
+        measurement_iterations: 500,
+        pin_to_core: Some(0),
+    });
+
+    // Use a test input
+    let test_input = 1000u64;
+
+    let rankings = sandbox.benchmark_all(&variants, test_input);
+
+    // Display results
+    println!("┌────┬──────────────────────┬────────────────┬────────────────┐");
+    println!("│ #  │ Variant              │ Cycles/Op      │ Throughput     │");
+    println!("├────┼──────────────────────┼────────────────┼────────────────┤");
+
+    let baseline_cycles = rankings
+        .first()
+        .map(|r| r.result.cycles_per_op)
+        .unwrap_or(1);
+
+    for ranked in &rankings {
+        let speedup = if ranked.rank == 0 {
+            "🏆 WINNER".to_string()
+        } else {
+            let ratio = ranked.result.cycles_per_op as f64 / baseline_cycles as f64;
+            format!("{:.2}x slower", ratio)
+        };
+
+        println!(
+            "│ {:2} │ {:20} │ {:>14} │ {:>14} │",
+            ranked.rank + 1,
+            &ranked.variant_name,
+            format!("{} cyc", ranked.result.cycles_per_op),
+            speedup
+        );
+    }
+    println!("└────┴──────────────────────┴────────────────┴────────────────┘");
+
+    // Execute the winning variant
+    if let Some(winner) = rankings.first() {
+        let winner_variant = variants
+            .iter()
+            .find(|v| v.config.name == winner.variant_name)
+            .expect("Winner not found");
+
+        println!("\n🚀 Executing winner: {}", winner.variant_name);
+        let result = winner_variant.execute(test_input);
+        println!("   Result: {}", result);
+        println!("   Cycles/Op: {}", winner.result.cycles_per_op);
+        println!(
+            "   Ops/Second: {:.2e}",
+            winner.result.throughput_ops_per_sec()
+        );
+    }
+
+    println!("\n✅ SOAE Demo Complete!\n");
+}
+
+/// SOAE with AI-Powered Variant Selection
+///
+/// Demonstrates Thompson Sampling bandit learning in real-time:
+/// 1. Generate variants
+/// 2. Initialize bandit with uniform priors
+/// 3. Each iteration: bandit selects variant → benchmark → update beliefs
+/// 4. Watch as bandit learns which variant is best
+fn run_soae_ai(path: &str, iterations: u32) {
+    println!("\n╔══════════════════════════════════════════════════════════════╗");
+    println!("║   🧠 NanoForge AI-Powered SOAE with Thompson Sampling 🧠    ║");
+    println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+    // Detect CPU features
+    let cpu = CpuFeatures::detect();
+    println!("🖥️  CPU Features: {}", cpu.summary());
+    println!("📊 Learning iterations: {}\n", iterations);
+
+    // Parse and generate variants
+    let script = std::fs::read_to_string(path).expect("Failed to read file");
+    let mut parser = NanoParser::new();
+    let program = parser.parse(&script).expect("Parse failed");
+
+    let generator = VariantGenerator::new();
+    let variants = generator
+        .generate_variants(&program)
+        .expect("Variant generation failed");
+
+    println!("📦 Generated {} variants:", variants.len());
+    let variant_names: Vec<String> = variants.iter().map(|v| v.config.name.clone()).collect();
+    for name in &variant_names {
+        println!("   • {}", name);
+    }
+
+    // Create sandbox
+    let sandbox = NanosecondSandbox::new(SandboxConfig {
+        warmup_iterations: 20,
+        measurement_iterations: 100,
+        pin_to_core: Some(0),
+    });
+
+    // Initialize Thompson Sampling bandit
+    let mut bandit = VariantBandit::new(variant_names.clone());
+    let test_input = 1000u64;
+
+    // Pre-benchmark to find true best (for validation)
+    let true_rankings = sandbox.benchmark_all(&variants, test_input);
+    let true_best = true_rankings
+        .first()
+        .map(|r| r.variant_name.clone())
+        .unwrap_or_default();
+    let best_cycles = true_rankings
+        .first()
+        .map(|r| r.result.cycles_per_op)
+        .unwrap_or(1);
+
+    println!("\n🎯 True best variant (ground truth): {}\n", true_best);
+    println!("🎰 Starting Thompson Sampling learning...\n");
+
+    // Learning loop
+    let mut correct_selections = 0u32;
+
+    for i in 1..=iterations {
+        // Bandit selects variant (exploration/exploitation)
+        let selected_idx = bandit.select();
+        let selected_variant = &variants[selected_idx];
+
+        // Benchmark selected variant
+        let result = sandbox.benchmark(selected_variant, test_input);
+
+        // Update bandit with performance reward
+        bandit.update_with_performance(selected_idx, result.cycles_per_op, best_cycles);
+
+        // Track accuracy
+        let is_correct = variant_names[selected_idx] == true_best;
+        if is_correct {
+            correct_selections += 1;
+        }
+
+        // Progress output (every 10 iterations)
+        if i <= 5 || i % 10 == 0 || i == iterations {
+            let best_guess = bandit.get_best();
+            let accuracy = (correct_selections as f64 / i as f64) * 100.0;
+            let marker = if variant_names[best_guess] == true_best {
+                "✓"
+            } else {
+                "✗"
+            };
+
+            println!(
+                "  Iter {:3}: Selected {:<12} | Best guess: {:<12} {} | Accuracy: {:.1}%",
+                i, &variant_names[selected_idx], &variant_names[best_guess], marker, accuracy
+            );
+        }
+    }
+
+    // Final results
+    println!("\n{}", "═".repeat(64));
+    bandit.print_status();
+
+    let final_best = bandit.get_best();
+    let converged = variant_names[final_best] == true_best;
+
+    if converged {
+        println!("\n🎉 SUCCESS: Bandit correctly converged to {}!", true_best);
+    } else {
+        println!(
+            "\n⚠️  Bandit converged to {} (true best: {})",
+            variant_names[final_best], true_best
+        );
+    }
+
+    // Execute winner
+    let winner_variant = &variants[final_best];
+    let result = winner_variant.execute(test_input);
+    println!("   Result: {}", result);
+
+    println!("\n✅ AI-Powered SOAE Complete!\n");
+}
+
+/// SOAE with Contextual Bandit - Learns Decision Boundaries
+///
+/// This is the KEY DEMO that shows context-aware learning:
+/// - Runs with VARYING input sizes (tiny, small, medium, large)
+/// - Learns that small inputs → Scalar is better
+/// - Learns that large inputs → AVX2 is better
+/// - Displays the learned decision boundary!
+fn run_soae_context(path: &str, iterations: u32) {
+    use rand::Rng;
+
+    println!("\n╔══════════════════════════════════════════════════════════════╗");
+    println!("║  🧠 CONTEXTUAL BANDIT - Learning Decision Boundaries! 🧠   ║");
+    println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+    // Detect CPU features
+    let cpu = CpuFeatures::detect();
+    println!("🖥️  CPU Features: {}", cpu.summary());
+    println!(
+        "📊 Learning iterations: {} (with variable input sizes)\n",
+        iterations
+    );
+
+    // Parse and generate variants
+    let script = std::fs::read_to_string(path).expect("Failed to read file");
+    let mut parser = NanoParser::new();
+    let program = parser.parse(&script).expect("Parse failed");
+
+    let generator = VariantGenerator::new();
+    let variants = generator
+        .generate_variants(&program)
+        .expect("Variant generation failed");
+
+    let variant_names: Vec<String> = variants.iter().map(|v| v.config.name.clone()).collect();
+    println!("📦 Generated {} variants:", variants.len());
+    for name in &variant_names {
+        println!("   • {}", name);
+    }
+
+    // Create sandbox
+    let sandbox = NanosecondSandbox::new(SandboxConfig {
+        warmup_iterations: 10,
+        measurement_iterations: 50,
+        pin_to_core: Some(0),
+    });
+
+    // Initialize CONTEXTUAL bandit (one per size bucket!)
+    let mut bandit = ContextualBandit::new(variant_names.clone());
+
+    println!("\n🎰 Starting Contextual Learning with Variable Input Sizes...\n");
+    println!("   The AI will see different input sizes and learn which");
+    println!("   variant works best for each size bucket!\n");
+
+    // Test sizes for each bucket
+    let test_sizes: Vec<u64> = vec![
+        10, 20, // Tiny
+        50, 100, 200, // Small
+        500, 1000, 2000, // Medium
+        5000, 10000,  // Large
+        100000, // Huge
+    ];
+
+    let mut rng = rand::thread_rng();
+
+    // Learning loop with varying input sizes
+    for i in 1..=iterations {
+        // Randomly pick an input size
+        let input_size = test_sizes[rng.gen_range(0..test_sizes.len())];
+        let context = OptimizationFeatures::new(input_size);
+        let bucket = context.size_bucket();
+
+        // Contextual bandit selects based on bucket
+        let selected_idx = bandit.select(&context);
+        let selected_variant = &variants[selected_idx];
+
+        // Benchmark this variant with this input size
+        let result = sandbox.benchmark(selected_variant, input_size);
+
+        // Find the actual best for this size (to compute reward)
+        let rankings = sandbox.benchmark_all(&variants, input_size);
+        let best_cycles = rankings
+            .first()
+            .map(|r| r.result.cycles_per_op)
+            .unwrap_or(1);
+
+        // Update bandit with performance in this context
+        bandit.update_with_performance(&context, selected_idx, result.cycles_per_op, best_cycles);
+
+        // Progress output
+        if i <= 10 || i % 20 == 0 || i == iterations {
+            println!(
+                "  Iter {:3}: N={:6} ({:12}) → Selected {}",
+                i,
+                input_size,
+                bucket.name(),
+                &variant_names[selected_idx]
+            );
+        }
+    }
+
+    // Display the learned decision boundary!
+    println!("\n{}", "═".repeat(64));
+    bandit.print_decision_boundary();
+
+    // Show detailed stats
+    bandit.print_full_status();
+
+    // Summary analysis
+    println!("\n📋 Analysis:");
+    let decisions = bandit.get_decision_boundary();
+    let mut scalar_wins = 0;
+    let mut avx_wins = 0;
+
+    for (bucket, variant, _) in &decisions {
+        let is_scalar = variant.starts_with("Scalar");
+        if is_scalar {
+            scalar_wins += 1;
+            if matches!(bucket, SizeBucket::Tiny | SizeBucket::Small) {
+                println!("   ✓ {} correctly prefers Scalar ({})", bucket, variant);
+            }
+        } else {
+            avx_wins += 1;
+            if matches!(
+                bucket,
+                SizeBucket::Medium | SizeBucket::Large | SizeBucket::Huge
+            ) {
+                println!("   ✓ {} correctly prefers AVX2 ({})", bucket, variant);
+            }
+        }
+    }
+
+    println!(
+        "\n   Decision Summary: Scalar wins {} buckets, AVX2 wins {} buckets",
+        scalar_wins, avx_wins
+    );
+
+    println!("\n✅ Contextual Bandit Learning Complete!\n");
 }

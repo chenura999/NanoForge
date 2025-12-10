@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::fmt;
 use std::os::unix::io::RawFd;
 use std::ptr;
 
@@ -7,6 +8,16 @@ pub struct DualMappedMemory {
     pub rx_ptr: *const u8,
     pub size: usize,
     fd: RawFd,
+}
+
+impl fmt::Debug for DualMappedMemory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DualMappedMemory")
+            .field("size", &self.size)
+            .field("rw_ptr", &format_args!("{:p}", self.rw_ptr))
+            .field("rx_ptr", &format_args!("{:p}", self.rx_ptr))
+            .finish()
+    }
 }
 
 impl DualMappedMemory {

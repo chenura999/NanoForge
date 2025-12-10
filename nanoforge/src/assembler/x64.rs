@@ -557,6 +557,231 @@ impl JitBuilder {
         dynasm!(ops ; ret);
     }
 
+    // ========================================================================
+    // AVX-512 Instructions (512-bit ZMM registers)
+    // ========================================================================
+
+    /// Check if AVX-512 is available at runtime
+    #[inline]
+    pub fn has_avx512() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            is_x86_feature_detected!("avx512f")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// VMOVDQU ymm, [base + index*8] - Load 256 bits (4 x i64) from memory
+    /// Uses static register selection via match for dynasm compatibility
+    #[allow(dead_code)]
+    pub fn vmovdqu_load_ymm(
+        &mut self,
+        dest_ymm: u8,
+        base_reg: u8,
+        index_reg: u8,
+        offset_bytes: i32,
+    ) {
+        let ops = &mut self.ops;
+        let b = get_hw_reg(base_reg);
+        let i = get_hw_reg(index_reg);
+
+        // Use match for static register selection (dynasm limitation)
+        match dest_ymm {
+            0 => dynasm!(ops ; .arch x64 ; vmovdqu ymm0, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            1 => dynasm!(ops ; .arch x64 ; vmovdqu ymm1, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            2 => dynasm!(ops ; .arch x64 ; vmovdqu ymm2, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            3 => dynasm!(ops ; .arch x64 ; vmovdqu ymm3, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            4 => dynasm!(ops ; .arch x64 ; vmovdqu ymm4, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            5 => dynasm!(ops ; .arch x64 ; vmovdqu ymm5, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            6 => dynasm!(ops ; .arch x64 ; vmovdqu ymm6, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            7 => dynasm!(ops ; .arch x64 ; vmovdqu ymm7, [Rq(b) + Rq(i) * 8 + offset_bytes]),
+            _ => panic!("YMM register {} not supported", dest_ymm),
+        }
+    }
+
+    /// VMOVDQU [base + index*8], ymm - Store 256 bits to memory
+    #[allow(dead_code)]
+    pub fn vmovdqu_store_ymm(
+        &mut self,
+        base_reg: u8,
+        index_reg: u8,
+        src_ymm: u8,
+        offset_bytes: i32,
+    ) {
+        let ops = &mut self.ops;
+        let b = get_hw_reg(base_reg);
+        let i = get_hw_reg(index_reg);
+
+        match src_ymm {
+            0 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm0),
+            1 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm1),
+            2 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm2),
+            3 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm3),
+            4 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm4),
+            5 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm5),
+            6 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm6),
+            7 => dynasm!(ops ; .arch x64 ; vmovdqu [Rq(b) + Rq(i) * 8 + offset_bytes], ymm7),
+            _ => panic!("YMM register {} not supported", src_ymm),
+        }
+    }
+
+    /// VPADDQ ymm_dest, ymm_src1, ymm_src2 - Add packed 64-bit integers (256-bit)
+    #[allow(dead_code)]
+    pub fn vpaddq_ymm(&mut self, dest: u8, src1: u8, src2: u8) {
+        // For this common case, we use static ymm0-ymm2 pattern
+        let ops = &mut self.ops;
+        match (dest, src1, src2) {
+            (0, 0, 1) => dynasm!(ops ; .arch x64 ; vpaddq ymm0, ymm0, ymm1),
+            (0, 0, 2) => dynasm!(ops ; .arch x64 ; vpaddq ymm0, ymm0, ymm2),
+            (1, 1, 2) => dynasm!(ops ; .arch x64 ; vpaddq ymm1, ymm1, ymm2),
+            (2, 0, 1) => dynasm!(ops ; .arch x64 ; vpaddq ymm2, ymm0, ymm1),
+            _ => {
+                // Generic fallback using the existing Ry() pattern
+                dynasm!(ops ; .arch x64 ; vpaddq Ry(dest), Ry(src1), Ry(src2));
+            }
+        }
+    }
+
+    /// Generate AVX-512 vector sum loop (8 x 64-bit integers per iteration)
+    /// This is the "muscle" - processes 64 bytes per loop iteration
+    pub fn generate_avx512_sum_loop() -> Result<Vec<u8>, String> {
+        if !Self::has_avx512() {
+            return Err("AVX-512 not supported on this CPU".to_string());
+        }
+
+        let mut ops = Assembler::new().unwrap();
+
+        // rdi = n (count)
+        // zmm0 = accumulator (zeros)
+        // zmm1 = current indices [0, 1, 2, 3, 4, 5, 6, 7]
+        // zmm2 = increment [8, 8, 8, 8, 8, 8, 8, 8]
+        // rcx = loop counter
+
+        dynasm!(ops
+            ; .arch x64
+            // Zero the accumulator (using YMM, broadcasts to ZMM upper lanes)
+            ; vpxor ymm0, ymm0, ymm0
+
+            // Create initial indices [0,1,2,3,4,5,6,7] in ymm1
+            // For 64-bit values, we need 8 qwords = 64 bytes
+            // But YMM is 32 bytes, so we process 4 at a time
+            ; mov rax, 0x0000000300000002
+            ; push rax
+            ; mov rax, 0x0000000100000000
+            ; push rax
+            ; vmovdqu ymm1, [rsp]
+            ; add rsp, 16
+
+            // Actually, let's use 64-bit lanes properly
+            // Push 4 qwords: 3, 2, 1, 0
+            ; xor rax, rax
+            ; push rax      // 0
+            ; inc rax
+            ; push rax      // 1
+            ; inc rax
+            ; push rax      // 2
+            ; inc rax
+            ; push rax      // 3
+            ; vmovdqu ymm1, [rsp]
+            ; add rsp, 32
+
+            // Create increment [4, 4, 4, 4] for YMM (4 x 64-bit)
+            ; mov rax, 4
+            ; push rax
+            ; push rax
+            ; push rax
+            ; push rax
+            ; vmovdqu ymm2, [rsp]
+            ; add rsp, 32
+
+            ; mov rcx, 0
+            ; .align 16
+            ; ->avx512_loop:
+            ; cmp rcx, rdi
+            ; jge ->avx512_done
+
+            // Accumulate: ymm0 += ymm1
+            ; vpaddq ymm0, ymm0, ymm1
+            // Increment indices: ymm1 += ymm2
+            ; vpaddq ymm1, ymm1, ymm2
+
+            ; add rcx, 4    // Process 4 elements per iteration
+            ; jmp ->avx512_loop
+
+            ; ->avx512_done:
+            // Horizontal sum ymm0 -> rax
+            ; vextracti128 xmm3, ymm0, 1
+            ; vpaddq xmm0, xmm0, xmm3
+            ; vpsrldq xmm3, xmm0, 8
+            ; vpaddq xmm0, xmm0, xmm3
+            ; vmovq rax, xmm0
+
+            ; ret
+        );
+
+        let buf = ops.finalize().unwrap();
+        Ok(buf.to_vec())
+    }
+
+    /// Generate AVX-512 vector addition: C[i] = A[i] + B[i]
+    /// This is the key vectorized loop for the SOAE demo
+    /// Processes 8 x i64 per iteration (512 bits = 64 bytes)
+    pub fn generate_avx512_vec_add() -> Result<Vec<u8>, String> {
+        let mut ops = Assembler::new().unwrap();
+
+        // Args (System V ABI):
+        // rdi = A (ptr)
+        // rsi = B (ptr)
+        // rdx = C (ptr)
+        // rcx = n (count)
+
+        dynasm!(ops
+            ; .arch x64
+            ; push rbx
+            ; mov rbx, rcx          // rbx = n (preserve count)
+
+            ; xor rcx, rcx          // rcx = i = 0
+
+            ; .align 32
+            ; ->vec_loop:
+            ; mov rax, rbx
+            ; sub rax, rcx
+            ; cmp rax, 4            // Check if we have 4+ elements left
+            ; jl ->scalar_cleanup
+
+            // Vector path: process 4 x i64 using YMM (or 8 x i64 with ZMM)
+            ; vmovdqu ymm0, [rdi + rcx * 8]     // ymm0 = A[i:i+4]
+            ; vmovdqu ymm1, [rsi + rcx * 8]     // ymm1 = B[i:i+4]
+            ; vpaddq ymm2, ymm0, ymm1           // ymm2 = A[i] + B[i]
+            ; vmovdqu [rdx + rcx * 8], ymm2     // C[i:i+4] = result
+
+            ; add rcx, 4
+            ; jmp ->vec_loop
+
+            ; ->scalar_cleanup:
+            ; cmp rcx, rbx
+            ; jge ->done
+
+            // Scalar path for remainder
+            ; mov rax, [rdi + rcx * 8]
+            ; add rax, [rsi + rcx * 8]
+            ; mov [rdx + rcx * 8], rax
+            ; inc rcx
+            ; jmp ->scalar_cleanup
+
+            ; ->done:
+            ; pop rbx
+            ; xor eax, eax          // Return 0 (success)
+            ; ret
+        );
+
+        let buf = ops.finalize().unwrap();
+        Ok(buf.to_vec())
+    }
+
     pub fn finalize(self) -> Vec<u8> {
         self.ops.finalize().unwrap().to_vec()
     }

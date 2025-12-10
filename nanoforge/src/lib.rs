@@ -1,7 +1,9 @@
+pub mod ai_optimizer;
 pub mod assembler;
 pub mod benchmark;
 pub mod benchmarker;
 pub mod compiler;
+pub mod cpu_features;
 pub mod hot_function;
 pub mod ir;
 pub mod jit_memory;
@@ -11,3 +13,4 @@ pub mod profiler;
 pub mod protocol;
 pub mod safety;
 pub mod sandbox;
+pub mod variant_generator;
