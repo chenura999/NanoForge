@@ -126,13 +126,13 @@ fn execute_script(script: &str, level: u8) -> Result<(), String> {
     match parser.parse(script) {
         Ok(prog) => {
             let (code, main_offset) =
-                Compiler::compile_program(&prog, level).map_err(|e| format!("{}", e))?;
+                Compiler::compile_program(&prog, level).map_err(|e| e.to_string())?;
 
             // Debug Dump
             std::fs::write("debug.bin", &code).expect("Failed to write debug.bin");
             println!("Dumped machine code to debug.bin");
 
-            let memory = DualMappedMemory::new(code.len() + 4096).map_err(|e| format!("{}", e))?;
+            let memory = DualMappedMemory::new(code.len() + 4096).map_err(|e| e.to_string())?;
             CodeGenerator::emit_to_memory(&memory, &code, 0);
             let func_ptr: extern "C" fn() -> i64 =
                 unsafe { std::mem::transmute(memory.rx_ptr.add(main_offset)) };
