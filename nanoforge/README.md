@@ -6,7 +6,7 @@ NanoForge doesn't just compile—it *learns*. Using Thompson Sampling and Contex
 ## 🧠 What Makes It Special
 
 ```bash
-$ cargo run --release --bin nanoforge -- soae-context vec_add_stress.nf -i 100
+$ cargo run --release --bin nanoforge -- soae-context matmul_stress.nf -i 100
 
 🧠 CONTEXTUAL BANDIT - Learning Decision Boundaries!
 
@@ -14,9 +14,11 @@ $ cargo run --release --bin nanoforge -- soae-context vec_add_stress.nf -i 100
 ┌──────────────────┬──────────────────┬───────────┐
 │ Input Size       │ Best Variant     │ Confidence│
 ├──────────────────┼──────────────────┼───────────┤
-│ Small (32-255)   │ Scalarx4         │     0.837 │  ← Scalar for small!
-│ Medium (256-4K)  │ AVX2x2           │     0.747 │  ← AVX2 for medium+
-│ Huge (>64K)      │ AVX2x2           │     0.644 │  ← AVX2 for huge!
+│ Tiny (<32)       │ Scalarx16        │     0.603 │  ← Scalar wins for Tiny!
+│ Small (32-255)   │ Scalarx2         │     0.623 │  ← Scalar wins for Small!
+│ Medium (256-4K)  │ AVX2x2           │     0.640 │  ← AVX2 wins for Medium!
+│ Large (4K-64K)   │ AVX2x4           │     0.600 │  ← AVX2 wins for Large!
+│ Huge (>64K)      │ Scalarx16        │     0.616 │  ← Scalarx16 (Spilled) wins for Huge!
 └──────────────────┴──────────────────┴───────────┘
 ```
 

@@ -255,43 +255,15 @@ impl JitBuilder {
 
     pub fn cmp_reg_reg(&mut self, reg1: u8, reg2: u8) {
         let ops = &mut self.ops;
-        let get_hw = |r: u8| -> u8 {
-            match r {
-                0 => 0,
-                1 => 8,
-                2 => 9,
-                3 => 10,
-                4 => 11,
-                5 => 15,
-                6 => 1,
-                7 => 3,
-                8 => 12,
-                9 => 13,
-                10 => 14,
-                _ => panic!("Reg {}", r),
-            }
-        };
-        let r1 = get_hw(reg1);
-        let r2 = get_hw(reg2);
+        let r1 = get_hw_reg(reg1);
+        let r2 = get_hw_reg(reg2);
         dynasm!(ops ; .arch x64 ; cmp Rq(r1), Rq(r2));
     }
 
     pub fn cmp_reg_imm(&mut self, reg: u8, imm: i32) {
         let ops = &mut self.ops;
-        match reg {
-            0 => dynasm!(ops ; .arch x64 ; cmp rax, imm),
-            1 => dynasm!(ops ; .arch x64 ; cmp r8, imm),
-            2 => dynasm!(ops ; .arch x64 ; cmp r9, imm),
-            3 => dynasm!(ops ; .arch x64 ; cmp r10, imm),
-            4 => dynasm!(ops ; .arch x64 ; cmp r11, imm),
-            5 => dynasm!(ops ; .arch x64 ; cmp r15, imm),
-            6 => dynasm!(ops ; .arch x64 ; cmp rcx, imm),
-            7 => dynasm!(ops ; .arch x64 ; cmp rbx, imm),
-            8 => dynasm!(ops ; .arch x64 ; cmp r12, imm),
-            9 => dynasm!(ops ; .arch x64 ; cmp r13, imm),
-            10 => dynasm!(ops ; .arch x64 ; cmp r14, imm),
-            _ => panic!("Cmp {}, imm not supported", reg),
-        }
+        let r = get_hw_reg(reg);
+        dynasm!(ops ; .arch x64 ; cmp Rq(r), imm);
     }
 
     pub fn je(&mut self, name: &str) {
@@ -339,20 +311,8 @@ impl JitBuilder {
     // ... existing math ops ...
     pub fn add_reg_imm(&mut self, dest_reg: u8, imm: i32) {
         let ops = &mut self.ops;
-        match dest_reg {
-            0 => dynasm!(ops ; .arch x64 ; add rax, imm),
-            1 => dynasm!(ops ; .arch x64 ; add r8, imm),
-            2 => dynasm!(ops ; .arch x64 ; add r9, imm),
-            3 => dynasm!(ops ; .arch x64 ; add r10, imm),
-            4 => dynasm!(ops ; .arch x64 ; add r11, imm),
-            5 => dynasm!(ops ; .arch x64 ; add r15, imm),
-            6 => dynasm!(ops ; .arch x64 ; add rcx, imm),
-            7 => dynasm!(ops ; .arch x64 ; add rbx, imm),
-            8 => dynasm!(ops ; .arch x64 ; add r12, imm),
-            9 => dynasm!(ops ; .arch x64 ; add r13, imm),
-            10 => dynasm!(ops ; .arch x64 ; add r14, imm),
-            _ => panic!("Add Reg {} not supported", dest_reg),
-        }
+        let r = get_hw_reg(dest_reg);
+        dynasm!(ops ; .arch x64 ; add Rq(r), imm);
     }
     pub fn sub_reg_imm(&mut self, dest_reg: u8, imm: i32) {
         let ops = &mut self.ops;
@@ -379,6 +339,12 @@ impl JitBuilder {
         dynasm!(ops ; .arch x64 ; mov Rq(d), [rbp + offset]);
     }
 
+    pub fn mov_stack_reg(&mut self, offset: i32, src_reg: u8) {
+        let ops = &mut self.ops;
+        let s = get_hw_reg(src_reg);
+        dynasm!(ops ; .arch x64 ; mov [rbp + offset], Rq(s));
+    }
+
     pub fn mov_reg_reg(&mut self, dest_reg: u8, src_reg: u8) {
         let ops = &mut self.ops;
         let d = get_hw_reg(dest_reg);
@@ -398,6 +364,21 @@ impl JitBuilder {
         let d = get_hw_reg(dest_reg);
         let s = get_hw_reg(src_reg);
         dynasm!(ops ; .arch x64 ; sub Rq(d), Rq(s));
+    }
+
+    pub fn imul_reg_reg(&mut self, dest_reg: u8, src_reg: u8) {
+        let ops = &mut self.ops;
+        let d = get_hw_reg(dest_reg);
+        let s = get_hw_reg(src_reg);
+        // imul dest, src (2-operand form)
+        dynasm!(ops ; .arch x64 ; imul Rq(d), Rq(s));
+    }
+
+    pub fn imul_reg_imm(&mut self, dest_reg: u8, imm: i32) {
+        let ops = &mut self.ops;
+        let d = get_hw_reg(dest_reg);
+        // imul dest, dest, imm (3-operand form, effectively dest *= imm)
+        dynasm!(ops ; .arch x64 ; imul Rq(d), Rq(d), imm);
     }
 
     // AVX2 Instructions

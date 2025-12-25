@@ -11,10 +11,11 @@ use nanoforge::variant_generator::VariantGenerator;
 use nanoforge::parser::Parser as NanoParser;
 use nanoforge::profiler::Profiler;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Level};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -22,7 +23,7 @@ struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Path to the Unix Domain Socket
+    /// Path to the Unix Domain Socket (for profiler/daemon connection)
     #[arg(short, long, default_value = "/tmp/nanoforge.sock")]
     socket_path: String,
 
@@ -33,6 +34,10 @@ struct Args {
     /// Threshold for AVX2 optimization
     #[arg(long, default_value_t = 50_000_000)]
     threshold_avx2: u64,
+
+    /// Enable verbose logging (Debug level)
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -44,6 +49,10 @@ enum Commands {
         file: String,
         #[arg(short, long, default_value_t = 3)]
         level: u8,
+    },
+    /// Check syntax of a script file without executing
+    Check {
+        file: String,
     },
     /// Run the internal demo/benchmark
     Demo,
@@ -87,36 +96,107 @@ enum Commands {
 }
 
 fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    let args = Args::parse();
+
+    // Initialize logging based on verbosity
+    let log_level = if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+
+    tracing_subscriber::fmt()
+        .with_max_level(log_level)
+        .init();
 
     // Register Crash Handler
     nanoforge::safety::register_crash_handler();
 
-    let args = Args::parse();
-
     match &args.command {
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Run { file, level }) => run_file(file, *level),
-        Some(Commands::Demo) => run_demo(&args),
-        Some(Commands::Benchmark { file, level }) => {
-            let script = std::fs::read_to_string(file).expect("Failed to read file");
-            // Default level 2 for explicit benchmark
-            if let Err(e) = nanoforge::benchmark::run_benchmark(&script, 10_000, *level) {
-                println!("Benchmark Error: {}", e);
+        Some(Commands::Run { file, level }) => {
+            if validate_file(file) {
+                run_file(file, *level);
             }
         }
-        Some(Commands::Adaptive { file }) => run_adaptive(file),
-        Some(Commands::Soae { file }) => run_soae(file),
-        Some(Commands::SoaeAi { file, iterations }) => run_soae_ai(file, *iterations),
-        Some(Commands::SoaeContext { file, iterations }) => run_soae_context(file, *iterations),
+        Some(Commands::Check { file }) => {
+             if validate_file(file) {
+                 run_check(file);
+             }
+        }
+        Some(Commands::Demo) => run_demo(&args),
+        Some(Commands::Benchmark { file, level }) => {
+            if validate_file(file) {
+                let script = std::fs::read_to_string(file).expect("Failed to read file");
+                // Default level 2 for explicit benchmark
+                if let Err(e) = nanoforge::benchmark::run_benchmark(&script, 10_000, *level) {
+                    error!("Benchmark Error: {}", e);
+                }
+            }
+        }
+        Some(Commands::Adaptive { file }) => {
+             if validate_file(file) { run_adaptive(file); }
+        }
+        Some(Commands::Soae { file }) => {
+             if validate_file(file) { run_soae(file); }
+        }
+        Some(Commands::SoaeAi { file, iterations }) => {
+             if validate_file(file) { run_soae_ai(file, *iterations); }
+        }
+        Some(Commands::SoaeContext { file, iterations }) => {
+             if validate_file(file) { run_soae_context(file, *iterations); }
+        }
         Some(Commands::Evolve {
             file,
             generations,
             population,
             target,
-        }) => run_evolve(file, *generations, *population, *target),
+        }) => {
+             if validate_file(file) { run_evolve(file, *generations, *population, *target); }
+        }
         None => run_repl(), // Default to REPL if no args
+    }
+}
+
+fn validate_file(path: &str) -> bool {
+    let p = Path::new(path);
+    if !p.exists() {
+        error!("File not found: {}", path);
+        return false;
+    }
+    if !p.is_file() {
+        error!("Path is not a file: {}", path);
+        return false;
+    }
+    true
+}
+
+fn run_check(path: &str) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to read file: {}", e);
+            return;
+        }
+    };
+    
+    let mut parser = NanoParser::new();
+    match parser.parse(&content) {
+        Ok(prog) => {
+            info!("Syntax OK: parsed {} functions.", prog.functions.len());
+            // Dry-run compilation to check for backend errors
+            match Compiler::compile_program(&prog, 2) {
+                Ok(_) => info!("Compilation Check OK."),
+                Err(e) => {
+                     error!("Syntax Check Failed: Compilation Error: {}", e);
+                     std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+             error!("Syntax Check Failed: Parse Error: {}", e);
+             std::process::exit(1);
+        }
     }
 }
 
@@ -159,7 +239,7 @@ fn run_file(path: &str, level: u8) {
     let content = std::fs::read_to_string(path).expect("Failed to read file");
     match execute_script(&content, level) {
         Ok(_) => {}
-        Err(e) => println!("Error: {}", e),
+        Err(e) => error!("Runtime Error: {}", e),
     }
 }
 
@@ -171,14 +251,17 @@ fn execute_script(script: &str, level: u8) -> Result<(), String> {
                 Compiler::compile_program(&prog, level).map_err(|e| e.to_string())?;
 
             // Debug Dump
-            std::fs::write("debug.bin", &code).expect("Failed to write debug.bin");
-            println!("Dumped machine code to debug.bin");
+            if tracing::enabled!(Level::DEBUG) {
+                 std::fs::write("debug.bin", &code).ok();
+                 info!("Dumped machine code to debug.bin");
+            }
 
             let memory = DualMappedMemory::new(code.len() + 4096).map_err(|e| e.to_string())?;
             CodeGenerator::emit_to_memory(&memory, &code, 0);
             let func_ptr: extern "C" fn() -> i64 =
                 unsafe { std::mem::transmute(memory.rx_ptr.add(main_offset)) };
-            println!("Executing...");
+            
+            info!("Executing script...");
             let result = func_ptr();
             println!("Result: {}", result);
             Ok(())
@@ -309,7 +392,6 @@ fn run_demo(args: &Args) {
             }
         };
 
-    // --- Step 3: Start Optimizer ---
     // --- Step 3: Start Optimizer ---
     // let optimizer = Optimizer::new(
     //     hot_func.clone(),
@@ -798,45 +880,8 @@ fn run_evolve(path: &str, generations: u32, population_size: usize, target: Opti
     println!("├──────┼────────────────┼────────────────┼────────────────┤");
 
     // Run evolution
-    let result = engine.run(generations, target);
+    engine.run(generations, target);
 
-    // Display results from history
-    for (i, gen_result) in result.history.iter().enumerate() {
-        if i < 5 || i % 10 == 0 || i == result.history.len() - 1 {
-            let speedup_str = if gen_result.speedup_vs_baseline >= 1.0 {
-                format!("✅ {:.2}x", gen_result.speedup_vs_baseline)
-            } else {
-                format!("   {:.2}x", gen_result.speedup_vs_baseline)
-            };
-
-            println!(
-                "│ {:4} │ {:>14.0} │ {:>6}/{:<6}  │ {:14} │",
-                gen_result.generation,
-                gen_result.best_fitness,
-                gen_result.valid_count,
-                population_size,
-                speedup_str
-            );
-        }
-    }
     println!("└──────┴────────────────┴────────────────┴────────────────┘");
-
-    // Final results
-    println!("\n{}", "═".repeat(64));
-    println!("🏆 EVOLUTION COMPLETE!");
-    println!("   Generations run: {}", result.generations_run);
-    println!("   Final speedup: {:.2}x", result.final_speedup);
-    println!(
-        "   Best genome: {} instructions",
-        result.best_genome.instructions.len()
-    );
-
-    if result.final_speedup > 1.0 {
-        println!(
-            "\n🎉 Code evolved to be {:.1}% faster than baseline!",
-            (result.final_speedup - 1.0) * 100.0
-        );
-    }
-
-    println!("\n✅ Self-Evolving JIT Complete!\n");
+    println!("\n✅ Evolution Complete.\n");
 }

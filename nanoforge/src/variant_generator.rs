@@ -94,6 +94,9 @@ impl VariantGenerator {
         configs.push(VariantConfig::new(IsaExtension::Scalar, 1, 1));
         configs.push(VariantConfig::new(IsaExtension::Scalar, 2, 2));
         configs.push(VariantConfig::new(IsaExtension::Scalar, 4, 2));
+        // High Register Pressure Stress Test
+        configs.push(VariantConfig::new(IsaExtension::Scalar, 8, 2));
+        configs.push(VariantConfig::new(IsaExtension::Scalar, 16, 2));
 
         // AVX2 variants (if supported)
         if self.cpu_features.has_avx2() {
@@ -204,9 +207,11 @@ mod tests {
     #[test]
     fn test_variant_generation() {
         let source = r#"
-            x = 42
-            y = x + 10
-            return y
+            fn main() {
+                x = 42
+                y = x + 10
+                return y
+            }
         "#;
 
         let mut parser = Parser::new();

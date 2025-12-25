@@ -12,6 +12,8 @@ pub enum Opcode {
     Mov,
     /// Add dest, src (dest += src)
     Add,
+    /// Mul dest, src (dest *= src)
+    Mul,
     /// Sub dest, src (dest -= src)
     Sub,
     /// Return the value in the first operand (or Accumulator/Reg(0))
