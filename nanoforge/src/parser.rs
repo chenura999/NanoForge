@@ -163,14 +163,13 @@ impl Parser {
 
         let mut func = Function::new(&name, args.clone());
 
-        // Emit Moves for Args: ArgName(NewReg) <- PhysArg(1..4)
+        // Emit Moves for Args: LoadArg(i) -> Reg(user_reg)
         for (i, arg_name) in args.iter().enumerate() {
             let user_reg = self.get_or_alloc_reg(arg_name);
-            let phys_proxy = (i + 1) as u8;
             func.push(Instruction {
-                op: Opcode::Mov,
+                op: Opcode::LoadArg(i),
                 dest: Some(Operand::Reg(user_reg)),
-                src1: Some(Operand::Reg(phys_proxy)),
+                src1: None,
                 src2: None,
             });
         }

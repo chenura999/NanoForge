@@ -41,6 +41,7 @@ for i in range(20):
     variant = opt.select(input_size)
     
     # Simulate: AVX wins for large, Scalar for small
+    
     if input_size >= 1000:
         cycles = 100 if variant >= 3 else 200  # AVX variants win
     else:

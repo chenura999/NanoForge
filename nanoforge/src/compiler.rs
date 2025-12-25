@@ -49,17 +49,10 @@ impl Compiler {
                 .collect();
 
             // Alloc GPRs (Pool: 0..15, with exclusions)
-            let gpr_pool = vec![1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13];
-            // We use a safe subset for now to match previous behavior if needed, or full set.
-            // Using full set (minus 0/RAX, 6/RCX) gives more registers.
-            // Safe subset: 1, 2, 3, 4, 5, 7, 8, 9, 10
-            let _gpr_pool_safe = vec![1, 2, 3, 4, 5, 7, 8, 9, 10];
-
-            // Actually, let's just rename the variable used in the code or prefix it.
-            // Looking at the error: `let gpr_pool_safe = ...` is unused.
-            // It seems `gpr_pool` is used later which is a subset or superset.
-            // Let's just prefix it.
-            let _gpr_pool_safe = vec![1, 2, 3, 4, 5, 7, 8, 9, 10];
+            // Reserved: 0 (RAX), 6 (RCX)
+            // Reserved for Fuel: 5 (R15)
+            let gpr_pool = vec![1, 2, 3, 4, 7, 8, 9, 10, 11, 12, 13];
+            let _gpr_pool_safe = vec![1, 2, 3, 4, 7, 8, 9, 10];
 
             // ... (Fixing other issues in separate chunks if possible, but replace_file_content is single chunk or multi file tool)
             // Wait, I should use multi_replace for scattering edits.
@@ -89,11 +82,50 @@ impl Compiler {
 
             // 2b. Emit Instructions
             builder.prologue(0);
+            
+            // Safety: Initialize Fuel Counter (R15 / Reg 5) -> 1,000,000 ops
+            builder.mov_reg_imm(5, 1_000_000);
+
+            // Identify Loop Headers (Labels that are targets of backward jumps)
+            let mut label_indices = HashMap::new();
+            for (i, instr) in func.instructions.iter().enumerate() {
+                if let Opcode::Label = instr.op {
+                    if let Some(Operand::Label(name)) = &instr.dest {
+                        label_indices.insert(name.clone(), i);
+                    }
+                }
+            }
+
+            let mut loop_headers = HashSet::new();
+            for (i, instr) in func.instructions.iter().enumerate() {
+                let target_label = match instr.op {
+                    Opcode::Jmp | Opcode::Jnz | Opcode::Je | Opcode::Jne | 
+                    Opcode::Jl | Opcode::Jle | Opcode::Jg | Opcode::Jge => {
+                        if let Some(Operand::Label(target)) = &instr.dest {
+                            Some(target)
+                        } else { None }
+                    }
+                    _ => None
+                };
+
+                if let Some(target) = target_label {
+                    if let Some(&target_idx) = label_indices.get(target) {
+                        if target_idx < i {
+                            loop_headers.insert(target.clone());
+                        }
+                    }
+                }
+            }
 
             for (idx, instr) in func.instructions.iter().enumerate() {
                 if let Some(Operand::Label(name)) = &instr.dest {
                     if instr.op == Opcode::Label {
                         builder.bind_label(name);
+                         // Safety: Check Fuel at Loop Header
+                        if loop_headers.contains(name) {
+                            builder.dec_reg(5); // Dec R15
+                            builder.jz("fuel_fail");
+                        }
                     }
                 }
                 match &instr.op {
@@ -231,10 +263,25 @@ impl Compiler {
                         }
                     }
                     Opcode::LoadArg(arg_idx) => {
-                        if *arg_idx >= 4 {
-                            let dest = get_phys(&instr.dest);
-                            let offset = 16 + (*arg_idx as i32 * 8);
-                            builder.mov_reg_stack(dest, offset);
+                        let dest = get_phys(&instr.dest);
+                        if *arg_idx < 4 {
+                            // System V ABI: RDI, RSI, RDX, RCX
+                            // PReg mapping: 11->RDI, 12->RSI, 13->RDX, 6->RCX
+                            let src_phys = match arg_idx {
+                                0 => 11,
+                                1 => 12,
+                                2 => 13,
+                                3 => 6,
+                                _ => unreachable!(),
+                            };
+                            if dest != src_phys {
+                                builder.mov_reg_reg(dest, src_phys);
+                            }
+                        } else {
+                            if *arg_idx >= 4 {
+                                let offset = 16 + (*arg_idx as i32 * 8);
+                                builder.mov_reg_stack(dest, offset);
+                            }
                         }
                     }
                     Opcode::Ret => {
@@ -359,6 +406,15 @@ impl Compiler {
                     }
                 }
             }
+        }
+
+            }
+            
+            // Safety: Fuel Failure Handler
+            // Returns -999 to indicate timeout/exhaustion
+            builder.bind_label("fuel_fail");
+            builder.mov_reg_imm(0, -999); 
+            builder.ret();
         }
 
         let buf = builder.finalize();

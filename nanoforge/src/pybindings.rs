@@ -24,9 +24,13 @@ use pyo3::prelude::*;
 use std::path::Path;
 
 use crate::ai_optimizer::{ContextualBandit, OptimizationFeatures, SizeBucket};
+use crate::array_ops;
 use crate::cpu_features::CpuFeatures;
 use crate::parser::Parser;
 use crate::variant_generator::VariantGenerator;
+
+use numpy::{PyArray1, PyReadonlyArray1, PyReadwriteArray1};
+use std::time::Instant;
 
 /// Python-exposed AI Optimizer using Contextual Bandit
 #[pyclass]
@@ -184,10 +188,212 @@ pub fn compile(source: &str) -> PyResult<CompiledFunction> {
     Ok(CompiledFunction { variant })
 }
 
+// ============================================================================
+// NumPy Array Operations (Zero-Copy, AVX2 Accelerated)
+// ============================================================================
+
+/// Add two arrays: C = A + B (AVX2 accelerated)
+///
+/// Example:
+/// ```python
+/// import numpy as np
+/// import nanoforge
+/// a = np.array([1, 2, 3, 4], dtype=np.int64)
+/// b = np.array([10, 20, 30, 40], dtype=np.int64)
+/// c = np.zeros(4, dtype=np.int64)
+/// nanoforge.vec_add(a, b, c)
+/// print(c)  # [11, 22, 33, 44]
+/// ```
+#[pyfunction]
+pub fn vec_add<'py>(
+    a: PyReadonlyArray1<'py, i64>,
+    b: PyReadonlyArray1<'py, i64>,
+    c: &PyArray1<i64>,
+) -> PyResult<()> {
+    let a_slice = a
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("Array a not contiguous: {}", e)))?;
+    let b_slice = b
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("Array b not contiguous: {}", e)))?;
+
+    // Get mutable slice from c
+    let c_slice = unsafe { c.as_slice_mut() }
+        .map_err(|e| PyValueError::new_err(format!("Array c not contiguous: {}", e)))?;
+
+    if a_slice.len() != b_slice.len() || a_slice.len() != c_slice.len() {
+        return Err(PyValueError::new_err(format!(
+            "Array size mismatch: a={}, b={}, c={}",
+            a_slice.len(),
+            b_slice.len(),
+            c_slice.len()
+        )));
+    }
+
+    array_ops::vec_add_i64(a_slice, b_slice, c_slice);
+    Ok(())
+}
+
+/// Sum all elements of an array (AVX2 accelerated)
+///
+/// Example:
+/// ```python
+/// import numpy as np
+/// import nanoforge
+/// arr = np.arange(1000000, dtype=np.int64)
+/// total = nanoforge.vec_sum(arr)
+/// ```
+#[pyfunction]
+pub fn vec_sum(arr: PyReadonlyArray1<i64>) -> PyResult<i64> {
+    let slice = arr
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("Array not contiguous: {}", e)))?;
+    Ok(array_ops::vec_sum_i64(slice))
+}
+
+/// Scale array in-place: arr *= scalar
+#[pyfunction]
+pub fn vec_scale(mut arr: PyReadwriteArray1<i64>, scalar: i64) -> PyResult<()> {
+    let slice = arr
+        .as_slice_mut()
+        .map_err(|e| PyValueError::new_err(format!("Array not contiguous: {}", e)))?;
+    array_ops::vec_scale_i64(slice, scalar);
+    Ok(())
+}
+
+/// Benchmark vec_add: returns (nanoforge_ns, numpy_estimated_ns)
+/// This runs NanoForge vec_add and estimates NumPy time based on memory bandwidth
+#[pyfunction]
+pub fn benchmark_vec_add(py: Python<'_>, size: usize) -> PyResult<(u64, u64)> {
+    // Create test arrays
+    let a: Vec<i64> = (0..size as i64).collect();
+    let b: Vec<i64> = (0..size as i64).map(|x| x * 2).collect();
+    let mut c = vec![0i64; size];
+
+    // Warmup
+    array_ops::vec_add_i64(&a, &b, &mut c);
+
+    // Benchmark NanoForge
+    let iterations = 100;
+    let start = Instant::now();
+    for _ in 0..iterations {
+        array_ops::vec_add_i64(&a, &b, &mut c);
+    }
+    let nanoforge_ns = start.elapsed().as_nanos() as u64 / iterations;
+
+    // Estimate NumPy time (run actual NumPy via Python)
+    let numpy_ns = py
+        .eval(
+            &format!(
+                r#"
+import numpy as np
+import time
+a = np.arange({}, dtype=np.int64)
+b = np.arange({}, dtype=np.int64) * 2
+c = np.zeros({}, dtype=np.int64)
+start = time.perf_counter_ns()
+for _ in range(100):
+    np.add(a, b, out=c)
+int((time.perf_counter_ns() - start) / 100)
+"#,
+                size, size, size
+            ),
+            None,
+            None,
+        )
+        .map_err(|e| PyValueError::new_err(format!("NumPy benchmark failed: {}", e)))?
+        .extract::<u64>()
+        .unwrap_or(0);
+
+    Ok((nanoforge_ns, numpy_ns))
+}
+
 /// Get NanoForge version
 #[pyfunction]
 pub fn version() -> &'static str {
     "0.1.0"
+}
+
+#[pyfunction]
+pub fn evolve(script: String, generations: u32, population: usize) -> PyResult<(String, f64)> {
+    use crate::assembler::CodeGenerator;
+    use crate::compiler::Compiler;
+    use crate::evolution::{EvolutionConfig, EvolutionEngine};
+    use crate::jit_memory::DualMappedMemory;
+    use crate::validator::TestCase;
+
+    let mut parser = Parser::new();
+    let program = parser
+        .parse(&script)
+        .map_err(|e| PyValueError::new_err(format!("Parse error: {}", e)))?;
+
+    if program.functions.is_empty() {
+        return Err(PyValueError::new_err("No functions found"));
+    }
+
+    let seed_function = &program.functions[0];
+    println!("🌱 Seed function: {}", seed_function.name);
+
+    // --- Generate Ground Truth ---
+    println!("🧪 Generating Ground Truth from Seed Code...");
+
+    // Compile seed to run it
+    let (code, main_offset) = Compiler::compile_program(&program, 0)
+        .map_err(|e| PyValueError::new_err(format!("Compile error: {}", e)))?;
+
+    let memory = DualMappedMemory::new(code.len() + 4096)
+        .map_err(|_| PyValueError::new_err("Memory alloc failed"))?;
+    CodeGenerator::emit_to_memory(&memory, &code, 0);
+
+    // Cast to function pointer
+    let func_ptr: extern "C" fn(i64) -> i64 =
+        unsafe { std::mem::transmute(memory.rx_ptr.add(main_offset)) };
+
+    // inputs to test
+    let inputs = vec![10, 100, 1000];
+    let mut test_cases = Vec::new();
+
+    for &input in &inputs {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func_ptr(input)));
+
+        match result {
+            Ok(output) => {
+                test_cases.push(TestCase::new(input, output));
+                println!("   input={:<5} → expected={:<10} (verified)", input, output);
+            }
+            Err(_) => {
+                return Err(PyValueError::new_err(format!(
+                    "Seed code crashed on input {}",
+                    input
+                )));
+            }
+        }
+    }
+
+    // Configure evolution
+    let config = EvolutionConfig {
+        population_size: population,
+        mutation_rate: 0.3,
+        crossover_rate: 0.7,
+        tournament_size: 5,
+        elite_count: 2,
+        seed: 42,
+    };
+
+    // Create evolution engine
+    let mut engine = EvolutionEngine::new(seed_function, test_cases, config);
+
+    println!("\n🧬 Starting Evolution...\n");
+    let result = engine.run(generations, None);
+
+    // TODO: Convert best genome to string representation
+    let best_code = format!(
+        "// Best genome: {} instructions\n// Speedup: {:.2}x\n",
+        result.best_genome.instructions.len(),
+        result.final_speedup
+    );
+
+    Ok((best_code, result.final_speedup))
 }
 
 /// Python module definition
@@ -199,5 +405,12 @@ fn nanoforge(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cpu_info, m)?)?;
     m.add_function(wrap_pyfunction!(compile, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    // NumPy array operations
+    m.add_function(wrap_pyfunction!(vec_add, m)?)?;
+    m.add_function(wrap_pyfunction!(vec_sum, m)?)?;
+    m.add_function(wrap_pyfunction!(vec_scale, m)?)?;
+    m.add_function(wrap_pyfunction!(benchmark_vec_add, m)?)?;
+    // Evolution
+    m.add_function(wrap_pyfunction!(evolve, m)?)?;
     Ok(())
 }

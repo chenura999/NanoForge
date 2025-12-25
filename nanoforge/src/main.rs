@@ -71,6 +71,19 @@ enum Commands {
         #[arg(short, long, default_value_t = 100)]
         iterations: u32,
     },
+    /// 🧬 EVOLVE: Use genetic algorithms to evolve optimal code
+    Evolve {
+        file: String,
+        /// Number of generations to evolve
+        #[arg(short, long, default_value_t = 50)]
+        generations: u32,
+        /// Population size
+        #[arg(short, long, default_value_t = 30)]
+        population: usize,
+        /// Target speedup to achieve (stops early if reached)
+        #[arg(short, long)]
+        target: Option<f64>,
+    },
 }
 
 fn main() {
@@ -97,6 +110,12 @@ fn main() {
         Some(Commands::Soae { file }) => run_soae(file),
         Some(Commands::SoaeAi { file, iterations }) => run_soae_ai(file, *iterations),
         Some(Commands::SoaeContext { file, iterations }) => run_soae_context(file, *iterations),
+        Some(Commands::Evolve {
+            file,
+            generations,
+            population,
+            target,
+        }) => run_evolve(file, *generations, *population, *target),
         None => run_repl(), // Default to REPL if no args
     }
 }
@@ -680,4 +699,144 @@ fn run_soae_context(path: &str, iterations: u32) {
     );
 
     println!("\n✅ Contextual Bandit Learning Complete!\n");
+}
+
+/// 🧬 EVOLVE: Genetic Algorithm Code Evolution
+///
+/// This demonstrates self-evolving code:
+/// 1. Parse seed function from .nf file
+/// 2. Execute seed function to generate "Ground Truth" outputs
+/// 3. Create population of mutated variants
+/// 4. Evolve through selection, crossover, mutation
+/// 5. Watch code get faster while maintaining correctness!
+fn run_evolve(path: &str, generations: u32, population_size: usize, target: Option<f64>) {
+    use nanoforge::evolution::{EvolutionConfig, EvolutionEngine};
+    use nanoforge::validator::TestCase;
+
+    println!("\n╔══════════════════════════════════════════════════════════════╗");
+    println!("║     🧬 NanoForge Self-Evolving JIT (Genetic Algorithm) 🧬    ║");
+    println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+    // Parse the seed function
+    let script = std::fs::read_to_string(path).expect("Failed to read file");
+    let mut parser = NanoParser::new();
+    let program = parser.parse(&script).expect("Parse failed");
+
+    if program.functions.is_empty() {
+        println!("❌ No functions found in {}", path);
+        return;
+    }
+
+    let seed_function = &program.functions[0];
+    println!("🌱 Seed function: {}", seed_function.name);
+    println!("   {} instructions", seed_function.instructions.len());
+    for (i, instr) in seed_function.instructions.iter().enumerate() {
+        println!("   {}: {:?}", i, instr);
+    }
+    println!("   {} arguments\n", seed_function.args.len());
+
+    // --- Generate Ground Truth ---
+    println!("🧪 Generating Ground Truth from Seed Code...");
+
+    // Compile seed to run it
+    let (code, main_offset) =
+        Compiler::compile_program(&program, 0).expect("Failed to compile seed for ground truth");
+
+    let memory = DualMappedMemory::new(code.len() + 4096).expect("Memory alloc failed");
+    CodeGenerator::emit_to_memory(&memory, &code, 0);
+
+    // Cast to function pointer
+    let func_ptr: extern "C" fn(i64) -> i64 =
+        unsafe { std::mem::transmute(memory.rx_ptr.add(main_offset)) };
+
+    // inputs to test
+    let inputs = vec![10, 100, 1000];
+    let mut test_cases = Vec::new();
+
+    for &input in &inputs {
+        // Run safely in case seed is bad, though unlikely for valid parse
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func_ptr(input)));
+
+        match result {
+            Ok(output) => {
+                test_cases.push(TestCase::new(input, output));
+                println!("   input={:<5} → expected={:<10} (verified)", input, output);
+            }
+            Err(_) => {
+                println!("❌ Seed code crashed on input {}! Cannot evolve.", input);
+                return;
+            }
+        }
+    }
+    println!("");
+
+    // Configure evolution
+    let config = EvolutionConfig {
+        population_size,
+        mutation_rate: 0.3,
+        crossover_rate: 0.7,
+        tournament_size: 5,
+        elite_count: 2,
+        seed: 42,
+    };
+
+    println!("⚙️  Evolution Config:");
+    println!("   Population: {}", config.population_size);
+    println!("   Generations: {}", generations);
+    println!("   Mutation rate: {:.0}%", config.mutation_rate * 100.0);
+    println!(
+        "   Target speedup: {}",
+        target.map_or("None".to_string(), |t| format!("{:.2}x", t))
+    );
+
+    // Create evolution engine
+    let mut engine = EvolutionEngine::new(seed_function, test_cases, config);
+
+    println!("\n🧬 Starting Evolution...\n");
+    println!("┌──────┬────────────────┬────────────────┬────────────────┐");
+    println!("│ Gen  │ Best Fitness   │ Valid/Pop      │ Speedup        │");
+    println!("├──────┼────────────────┼────────────────┼────────────────┤");
+
+    // Run evolution
+    let result = engine.run(generations, target);
+
+    // Display results from history
+    for (i, gen_result) in result.history.iter().enumerate() {
+        if i < 5 || i % 10 == 0 || i == result.history.len() - 1 {
+            let speedup_str = if gen_result.speedup_vs_baseline >= 1.0 {
+                format!("✅ {:.2}x", gen_result.speedup_vs_baseline)
+            } else {
+                format!("   {:.2}x", gen_result.speedup_vs_baseline)
+            };
+
+            println!(
+                "│ {:4} │ {:>14.0} │ {:>6}/{:<6}  │ {:14} │",
+                gen_result.generation,
+                gen_result.best_fitness,
+                gen_result.valid_count,
+                population_size,
+                speedup_str
+            );
+        }
+    }
+    println!("└──────┴────────────────┴────────────────┴────────────────┘");
+
+    // Final results
+    println!("\n{}", "═".repeat(64));
+    println!("🏆 EVOLUTION COMPLETE!");
+    println!("   Generations run: {}", result.generations_run);
+    println!("   Final speedup: {:.2}x", result.final_speedup);
+    println!(
+        "   Best genome: {} instructions",
+        result.best_genome.instructions.len()
+    );
+
+    if result.final_speedup > 1.0 {
+        println!(
+            "\n🎉 Code evolved to be {:.1}% faster than baseline!",
+            (result.final_speedup - 1.0) * 100.0
+        );
+    }
+
+    println!("\n✅ Self-Evolving JIT Complete!\n");
 }

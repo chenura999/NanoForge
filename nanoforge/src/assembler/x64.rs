@@ -557,6 +557,18 @@ impl JitBuilder {
         dynasm!(ops ; ret);
     }
 
+    pub fn dec_reg(&mut self, reg: u8) {
+        let ops = &mut self.ops;
+        let r = get_hw_reg(reg);
+        dynasm!(ops ; .arch x64 ; dec Rq(r));
+    }
+
+    pub fn jz(&mut self, name: &str) {
+        let label = self.get_label(name);
+        let ops = &mut self.ops;
+        dynasm!(ops ; .arch x64 ; jz =>label);
+    }
+
     // ========================================================================
     // AVX-512 Instructions (512-bit ZMM registers)
     // ========================================================================
